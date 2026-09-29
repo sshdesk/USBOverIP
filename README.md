@@ -2,8 +2,7 @@
 
 shared-usb/
 
-├── firebase/          # Cloud sync, remote configurations, or database triggers
-
+├── firebase/          # websocket with libwebrtc
 ├── usbip/             # Core Windows USB/IP utilities, scripts, and client wrappers
 
 ├── usbipd/            # Windows USB/IP daemon components and host tools
