@@ -28,8 +28,8 @@ This document outlines a 4-week task list to bridge a local USB device at a lapt
 |                       LOCAL LAPTOP                          |               |                       AWS CLOUD                       |
 |                                                             |               |                                                       |
 |  +------------------+     +------------+     +-----------+  |  WebRTC Data  |  +-----------+     +------------+     +------------+  |
-|  | Physical USB     | --> | usbipd-win | --> |usbipd.exe |  |  Channel      |  | usbipd    | <-- | Custom     | <-- | Client     |  |
-|  | Plug & Play Device|    | backend    |     | (Client)  |  =============== |  | Server    |     | AWS Daemon |     | App / App  |  |
+|  | Physical USB     | --> | usbipd-win | --> |usbipd.exe |  |  Channel      |  | usbip     | <-- | Custom     | <-- | Client     |  |
+|  | Plug & Play Device|    | backend    |     | (server)  |  =============== |  | Client    |     | AWS Daemon |     | App / App  |  |
 |  +------------------+     +------------+     +-----------+  | (STUN/TURN)   |  +-----------+     +------------+     +------------+  |
 +-------------------------------------------------------------+               +-------------------------------------------------------+
 ```
