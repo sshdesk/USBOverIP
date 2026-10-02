@@ -79,8 +79,8 @@ Intercept raw USBIP network traffic from local abstraction layers and encapsulat
 *   **Task 3.1: `usbip.exe` USBIP Traffic Hijacking**
     *   Program `usbip.exe` to attach locally to `usbipd-win` via local scptp datachanel
     *   Read incoming USBIP packets (OP_REQ_IMPORT, USBIP_CMD_SUBMIT, etc.) out of the socket and stream them sequentially as binary payloads directly into the WebRTC Data Channel.
-*   **Task 3.2: AWS Cloud Decapsulation & Injection**
-    *   Develop the cloud daemon to ingest raw WebRTC binary frames, unpack the USBIP network protocol format, and feed them into a local virtual Linux `vhci-hcd` (Virtual Host Controller Interface) kernel module.
+*   **Task 3.2:Device Driver Installation**
+    *   Driver installtion and feed stream into a local vhci-hcd` 
 *   **Task 3.3: Async Frame**
     *   Optimize datachannel transmission with non-blocking I/O routines 
 
