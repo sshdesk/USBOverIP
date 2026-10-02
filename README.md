@@ -80,7 +80,9 @@ Intercept raw USBIP network traffic from local abstraction layers and encapsulat
     *   Program `usbip.exe` to attach locally to `usbipd-win` via local scptp datachanel
     *   Read incoming USBIP packets (OP_REQ_IMPORT, USBIP_CMD_SUBMIT, etc.) out of the socket and stream them sequentially as binary payloads directly into the WebRTC Data Channel.
 *   **Task 3.2:Device Driver Installation**
-    *   Driver installtion and feed stream into a local vhci-hcd` 
+    *   Driver installtion and feed stream into aws 
+    1. usbip2_ude (Virtual Host Controller Interface): Emulates a local USB root hub.
+    2. usbip2_filter (Upper Class Filter Driver): Intercepts and routes system-level USB Requests Packages (IRPs) safely
 *   **Task 3.3: Async Frame**
     *   Optimize datachannel transmission with non-blocking I/O routines 
 
