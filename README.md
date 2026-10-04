@@ -28,8 +28,8 @@ This document outlines a 4-week task list to bridge a local USB device at a lapt
 |                       LOCAL LAPTOP                          |               |                       AWS CLOUD                       |
 |                                                             |               |                                                       |
 |  +------------------+     +------------+     +-----------+  |  WebRTC Data  |  +-----------+     +------------+     +------------+  |
-|  | Physical USB     | --> | usbipd-win | --> |usbipd.exe |  |  Channel      |  | usbipd    | <-- | Custom     | <-- | Client     |  |
-|  | Plug & Play Device|    | backend    |     | (Client)  |  =============== |  | Server    |     | AWS Daemon |     | App / App  |  |
+|  | Physical USB     | --> | usbipd-win | --> |usbipd.exe |  |  Channel      |  | usbip     | <-- | Custom     | <-- | Client     |  |
+|  | Plug & Play Device|    | backend    |     | (server)  |  =============== |  | Client    |     | AWS Daemon |     | App / App  |  |
 |  +------------------+     +------------+     +-----------+  | (STUN/TURN)   |  +-----------+     +------------+     +------------+  |
 +-------------------------------------------------------------+               +-------------------------------------------------------+
 ```
@@ -79,8 +79,10 @@ Intercept raw USBIP network traffic from local abstraction layers and encapsulat
 *   **Task 3.1: `usbip.exe` USBIP Traffic Hijacking**
     *   Program `usbip.exe` to attach locally to `usbipd-win` via local scptp datachanel
     *   Read incoming USBIP packets (OP_REQ_IMPORT, USBIP_CMD_SUBMIT, etc.) out of the socket and stream them sequentially as binary payloads directly into the WebRTC Data Channel.
-*   **Task 3.2: AWS Cloud Decapsulation & Injection**
-    *   Develop the cloud daemon to ingest raw WebRTC binary frames, unpack the USBIP network protocol format, and feed them into a local virtual Linux `vhci-hcd` (Virtual Host Controller Interface) kernel module.
+*   **Task 3.2:Device Driver Installation**
+    *   Driver installtion and feed stream into aws 
+    1. usbip2_ude (Virtual Host Controller Interface): Emulates a local USB root hub.
+    2. usbip2_filter (Upper Class Filter Driver): Intercepts and routes system-level USB Requests Packages (IRPs) safely
 *   **Task 3.3: Async Frame**
     *   Optimize datachannel transmission with non-blocking I/O routines 
 
