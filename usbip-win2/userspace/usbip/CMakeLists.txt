@@ -21,7 +21,7 @@ set_target_properties(usbip PROPERTIES
 
 target_compile_features(usbip
     PRIVATE
-        cxx_std_23   # <-- Change this back to 23 to enable std::println
+        cxx_std_23
         c_std_17
 )
 
@@ -46,21 +46,7 @@ target_link_libraries(usbip
         libusbip
 )
 
-# Keep the target options explicitly bound right here
-if(MSVC)
-    target_compile_options(usbip
-        PRIVATE
-            /W4
-            /Zc:__cplusplus   
-    )
-else()
-    target_compile_options(usbip
-        PRIVATE
-            /W4
-    )
-endif()
-
-target_link_options(usbip
+target_compile_options(usbip
     PRIVATE
-        /PDBALTPATH:%_PDB%
+        /W4
 )

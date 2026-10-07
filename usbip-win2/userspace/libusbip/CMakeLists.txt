@@ -59,9 +59,3 @@ target_compile_options(libusbip
     PRIVATE
         /W4
 )
-
-target_link_options(libusbip
-    PRIVATE
-        /PDBALTPATH:%_PDB%
-)
-

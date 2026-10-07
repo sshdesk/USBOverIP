@@ -16,7 +16,7 @@
 namespace usbip::log
 {
 
-inline bool g_debug = false;
+inline bool g_debug = true;
 
 inline void set_debug(bool enable) noexcept
 {

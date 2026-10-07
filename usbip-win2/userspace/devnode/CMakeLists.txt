@@ -47,8 +47,3 @@ target_compile_options(devnode
         /W4
 )
 
-target_link_options(devnode
-    PRIVATE
-        /PDBALTPATH:%_PDB%
-)
-
