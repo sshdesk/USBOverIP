@@ -63,6 +63,5 @@ ImagePath                                              Start Type
 
 
 
-
-Set-ExecutionPolicy Bypass -Scope Process -Force
+ powershell -ExecutionPolicy Bypass
 .\install.ps1
