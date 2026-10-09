@@ -3,7 +3,7 @@
 # ==============================================================================
 
 # 1. Define folder path and variables
-$AppDir = "C:\Debug\shared-usb\usbip-win2\drivers"
+$AppDir = Split-Path -Path $MyInvocation.MyCommand.Path -Parent
 $HwId = "ROOT\USBIP_WIN2\UDE"
 $UsbClassGuid = "{36fc9e60-c465-11cf-8056-444553540000}"
 

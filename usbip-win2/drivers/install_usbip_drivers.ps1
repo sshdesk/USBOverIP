@@ -2,7 +2,7 @@
 # usbip-win2 Native CLI Deployment Script (Zero Dollar-Signs Version)
 # ==============================================================================
 
-Set-Location -Path "C:\Debug\shared-usb\usbip-win2\drivers"
+Set-Location -Path (Split-Path -Path (Get-Variable -Name MyInvocation).Value.MyCommand.Path -Parent)
 
 Write-Host "--- Starting usbip-win2 Driver Provisioning ---" -ForegroundColor Cyan
 
@@ -15,9 +15,6 @@ pnputil.exe /add-driver .\usbip2_filter.inf /install
 Write-Host "[2/5] Instantiating Virtual Root Device Node..." -ForegroundColor Cyan
 .\devnode.exe install .\usbip2_ude.inf ROOT\USBIP_WIN2\UDE
 
-# 3. Inject usbip2_filter into the global USB UpperFilters stack via Native REG command
-Write-Host "[3/5] Injecting UpperFilter via Registry CLI..." -ForegroundColor Cyan
-reg.exe add "HKLM\SYSTEM\CurrentControlSet\Control\Class\{36fc9e60-c465-11cf-8056-444553540000}" /v UpperFilters /t REG_MULTI_SZ /d "usbip2_filter\0USBHUB3" /f
 
 # 4. Refresh the hardware layer to wake the SCM and start the services
 Write-Host "[4/5] Triggering Plug-and-Play hardware rescan..." -ForegroundColor Cyan
