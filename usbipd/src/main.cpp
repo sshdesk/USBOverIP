@@ -6,6 +6,10 @@
 #include <string.h>
 #include <signal.h>
 
+#ifdef _WIN32
+#include <process.h>
+#endif
+
 static usbip_server_t *g_server = NULL;
 
 #ifdef _WIN32
