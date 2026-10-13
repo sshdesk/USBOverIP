@@ -32,6 +32,12 @@ cmake --build build
 
 
 
+conan install . --output-folder=build --build=missing --build=never=google-webrtc* -s build_type=Release
+
+cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=build/conan_toolchain.cmake -DCMAKE_BUILD_TYPE=Release
+          
+
+
 
 conan build . --output-folder=build
 

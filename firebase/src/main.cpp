@@ -16,9 +16,14 @@
 #include "firebase/app.h"
 #include "firebase/firestore.h"
 
+#include "tcptunnel.h"
+
+
 rtc::scoped_refptr<webrtc::PeerConnectionInterface> peer_connection = nullptr;
 rtc::scoped_refptr<webrtc::DataChannelInterface> native_data_channel = nullptr;
 webrtc::DataChannelObserver* global_dc_observer = nullptr;
+
+WebRtcTcpTunnelManager tunnel_manager(3240);
 
 std::atomic<bool> keep_running{true};
 std::string shared_input_buffer = "";
@@ -36,8 +41,21 @@ public:
     }
     
     void OnMessage(const webrtc::DataBuffer& buffer) override {
-        std::string inbound_text(reinterpret_cast<const char*>(buffer.data.data()), buffer.data.size());
-        SPDLOG_INFO("PEER MESSAGE: {}", inbound_text);
+        // std::string inbound_text(reinterpret_cast<const char*>(buffer.data.data()), buffer.data.size());
+        // SPDLOG_INFO("PEER MESSAGE: {}", inbound_text);
+
+        const uint8_t* data_ptr = buffer.data.data();
+        size_t data_size = buffer.data.size();
+
+        std::string hex_str;
+        char hex_buf[16];
+        for (size_t i = 0; i < data_size; ++i) {
+            std::snprintf(hex_buf, sizeof(hex_buf), "%02X ", data_ptr[i]);
+            hex_str += hex_buf;
+        }
+
+        SPDLOG_INFO("PEER BINARY MESSAGE [{} bytes]: [ {}]", data_size, hex_str);
+
     }
     
     void OnBufferedAmountChange(uint64_t previous_amount) override {}
@@ -121,6 +139,16 @@ public:
         SPDLOG_INFO("--> Remote DataChannel negotiated and attached.");
         native_data_channel = data_channel;
         native_data_channel->RegisterObserver(global_dc_observer);
+
+        // Start the TCP server listener
+        if (!tunnel_manager.Start()) {
+            SPDLOG_ERROR("Failed to start tunnel manager because TCP bind failed.");
+            return;
+        }
+
+        SPDLOG_INFO("WebRTC Remote peer opened DataChannel. Linking to TCP tunnel manager...");
+        rtc::Thread* current_thread = rtc::Thread::Current();
+        tunnel_manager.HandleDataChannel(data_channel, current_thread);
     }
 
     void OnSignalingChange(webrtc::PeerConnectionInterface::SignalingState new_state) override {}
@@ -189,10 +217,30 @@ int main() {
 
     if (choice == 1) {
         webrtc::DataChannelInit dc_config;
+
+
+        dc_config.maxRetransmits = std::nullopt; 
+        dc_config.maxRetransmitTime = std::nullopt;
+
+        // 2. Guarantee strict ordering
+        // This ensures packets are delivered to the observer in the exact sequence they were sent.
+        dc_config.ordered = true; 
+
+
         auto dc_result = peer_connection->CreateDataChannelOrError("chat-channel", &dc_config);
         if (dc_result.ok()) {
             native_data_channel = dc_result.MoveValue();
             native_data_channel->RegisterObserver(global_dc_observer);
+/*
+            if (!tunnel_manager.Start()) {
+                SPDLOG_ERROR("Failed to start tunnel manager because TCP bind failed on Caller.");
+            } else {
+                SPDLOG_INFO("Caller DataChannel created. Linking to TCP tunnel manager...");
+                rtc::Thread* current_thread = rtc::Thread::Current();
+                tunnel_manager.HandleDataChannel(native_data_channel, current_thread);
+            }
+
+*/
         }
 
         if (!saved_room_id.empty()) {
@@ -243,9 +291,16 @@ int main() {
 
         if (!active_msg.empty()) {
             if (native_data_channel && native_data_channel->state() == webrtc::DataChannelInterface::kOpen) {
-                webrtc::DataBuffer buffer(active_msg);
-                native_data_channel->Send(buffer);
-                SPDLOG_INFO("[Sent]: {}", active_msg);
+                //webrtc::DataBuffer buffer(active_msg);
+                //native_data_channel->Send(buffer);
+                //SPDLOG_INFO("[Sent]: {}", active_msg);
+
+                 // Sent explicitly as binary payload buffer
+                rtc::CopyOnWriteBuffer buffer(reinterpret_cast<const uint8_t*>(active_msg.data()), active_msg.size());
+                webrtc::DataBuffer data_buffer(buffer, true); 
+                native_data_channel->Send(data_buffer);
+                SPDLOG_INFO("[Sent Binary Data]: {} bytes", active_msg.size());
+
             } else {
                 SPDLOG_WARN("Data pipeline is not open yet.");
             }
