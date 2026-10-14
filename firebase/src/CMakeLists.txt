@@ -5,19 +5,41 @@ project(WebRtcFirebaseSignaling VERSION 1.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-
-
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_GLIBCXX_ASSERTIONS")
-
 
 find_package(OpenSSL REQUIRED)
 find_package(google-webrtc REQUIRED)
 find_package(spdlog REQUIRED)
 
-
-set(FIREBASE_CPP_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/firebase_cpp_sdk")
+# Include the Firebase C++ SDK Subdirectory
+set(FIREBASE_CPP_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../firebasesdk/third_party/firebase_cpp_sdk/firebase_cpp_sdk")
 add_subdirectory(${FIREBASE_CPP_SDK_DIR} bin/ EXCLUDE_FROM_ALL)
 
+
+if(WIN32)
+    # Automatically resolve configuration subfolder type (fallback to Debug if not specified)
+    if(CMAKE_BUILD_TYPE STREQUAL "Release")
+        set(FB_CONFIG_TYPE "Release")
+    else()
+        set(FB_CONFIG_TYPE "Debug")
+    endif()
+
+
+    set(FB_CORRECT_LIB_DIR "${FIREBASE_CPP_SDK_DIR}/libs/windows/VS2019/MT/x64/${FB_CONFIG_TYPE}")
+
+
+    set_target_properties(firebase_firestore PROPERTIES IMPORTED_LOCATION "${FB_CORRECT_LIB_DIR}/firebase_firestore.lib")
+    set_target_properties(firebase_database  PROPERTIES IMPORTED_LOCATION "${FB_CORRECT_LIB_DIR}/firebase_database.lib")
+    set_target_properties(firebase_auth      PROPERTIES IMPORTED_LOCATION "${FB_CORRECT_LIB_DIR}/firebase_auth.lib")
+    set_target_properties(firebase_app       PROPERTIES IMPORTED_LOCATION "${FB_CORRECT_LIB_DIR}/firebase_app.lib")
+    
+
+    link_libraries(dbghelp.lib)
+    
+
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+# -------------------------------------------------------------------------
 
 add_executable(webrtc_signaling_app 
     main.cpp 
@@ -28,10 +50,12 @@ add_executable(webrtc_signaling_app
 
 if(WIN32)
     target_compile_definitions(webrtc_signaling_app PRIVATE WEBRTC_WIN NOMINMAX WIN32_LEAN_AND_MEAN)
+    
+    # Suppress the noisy LNK4099 warnings regarding missing internal libcurl PDB files
+    target_link_options(webrtc_signaling_app PRIVATE "/IGNORE:4099")
 else()
     target_compile_definitions(webrtc_signaling_app PRIVATE WEBRTC_POSIX)
 endif()
-
 
 find_package(Threads REQUIRED)
 
@@ -74,3 +98,34 @@ else()
         dl rt m pthread
     )
 endif()
+
+set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/install" CACHE PATH "Local install prefix" FORCE)
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/google-services.json")
+    # Automatically resolve target runtime subfolder layout based on setup configurations
+    if(CMAKE_BUILD_TYPE STREQUAL "Release")
+        set(FB_OUTPUT_CONFIG "Release")
+    else()
+        set(FB_OUTPUT_CONFIG "Debug")
+    endif()
+    
+    # Copy to the active build compilation configuration directory path
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/google-services.json"
+        "${CMAKE_BINARY_DIR}/${FB_OUTPUT_CONFIG}/google-services.json"
+        COPYONLY
+    )
+    
+    # Add an installation rule to copy the file to the deployment Install directory
+    install(
+        FILES "${CMAKE_CURRENT_SOURCE_DIR}/google-services.json"
+        DESTINATION bin
+    )
+else()
+    message(WARNING "google-services.json not found in source directory: ${CMAKE_CURRENT_SOURCE_DIR}")
+endif()
+
+install(TARGETS webrtc_signaling_app
+    RUNTIME DESTINATION bin
+    BUNDLE DESTINATION bin
+)

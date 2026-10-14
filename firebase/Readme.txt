@@ -4,8 +4,27 @@ conan remove firebase-cpp-sdk/13.12.0 --confirm
 conan create .
 
 
+for windows do python ../conan-deps/src/conan-cache-generator.py --build-project --type debug
 
 
+conan cache clean "openssl/*" --build
+conan remove "openssl/*" --confirm
+
+
+
+
+for windows 
+$env:CONAN_HOME="C:\Users\akumr\streaming_host\conan-deps\src\temp\conan-cache-msvc193-release"
+$env:CONAN_HOME="E:\workspace\shared-usb\cd"
+conan list "*:*"
+
+
+cd E:\workspace\shared-usb\firebase\src
+
+
+conan install . --build=never -s build_type=RelWithDebInfo
+
+ conan install . --output-folder=build --build=missing -s build_type=Debug -s os=Windows
 
 conan install . --output-folder=build --build=missing -s build_type=Release
 
