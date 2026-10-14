@@ -10,43 +10,36 @@ class TCPClient:
         self.timeout = timeout
         self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.is_running = False
+        self.send_counter = 0  # Incremental counter
 
     def connect(self):
-        """Establishes connection with a timeout, sends initial data, and listens."""
         try:
             print(f"[CONNECTING] Attempting to reach {self.host}:{self.port}...", flush=True)
-            
-            # Set a timeout so the script doesn't hang forever if the server is down
             self.client_socket.settimeout(self.timeout)
             self.client_socket.connect((self.host, self.port))
-            
-            # Remove timeout for standard blocking operations after a successful connection
             self.client_socket.settimeout(None)
             
             self.is_running = True
             print(f"[CONNECTED] Successfully connected to {self.host}:{self.port}", flush=True)
             
-            # --- 1. SEND DATA IMMEDIATELY ON CONNECT ---
-            initial_payload = b'\x00\x01\x02\x03'
-            print("[CONNECT EVENT] Sending initial greeting payload...", flush=True)
-            self.send_binary(initial_payload)
+            # --- Send initial 16 KB payload ---
+            self.send_16kb_packet()
             
-            # Start background listener for subsequent data
             receive_thread = threading.Thread(target=self._listen_for_data, daemon=True)
             receive_thread.start()
             
         except socket.timeout:
-            print(f"[ERROR] Connection timed out after {self.timeout} seconds. Is the server running?", flush=True)
+            print(f"[ERROR] Connection timed out after {self.timeout} seconds.", flush=True)
             sys.exit(1)
         except Exception as e:
             print(f"[ERROR] Connection failed: {e}", flush=True)
             sys.exit(1)
 
     def _listen_for_data(self):
-        """Internal loop that waits for server data."""
         while self.is_running:
             try:
-                data = self.client_socket.recv(4096)
+                # Read up to 16KB or stream chunks until full 16KB is received
+                data = self.client_socket.recv(16384)
                 if not data:
                     print("[DISCONNECTED] Server closed the connection cleanly.", flush=True)
                     self.disconnect()
@@ -60,28 +53,41 @@ class TCPClient:
                 break
 
     def on_receive(self, data: bytes):
-        """Callback executed on incoming data."""
-        print(f"\n[RECEIVED] Received {len(data)} bytes from server.", flush=True)
-        print(f"[RECEIVED] Hex: {data.hex()}", flush=True)
+        """Callback executed on incoming data from server."""
+        print(f"\n[RECEIVED] Total bytes received: {len(data)} bytes", flush=True)
         
-        # --- 2. SEND DATA ON RECEIVE ---
-        response_payload = b'\xAA\xBB\xCC\xDD'
-        print("[RECEIVE EVENT] Triggering automatic binary reply...", flush=True)
-        self.send_binary(response_payload)
+        if len(data) >= 8:
+            received_val = int.from_bytes(data[:8], byteorder='little')
+            print(f"[RECEIVED] Server Counter Value: #{received_val}", flush=True)
+        
+        # Automatically send the next 16KB packet after a short delay
+        time.sleep(1.0)
+        self.send_16kb_packet()
 
-    def send_binary(self, binary_data: bytes):
-        """Sends raw binary data to the server."""
+    def send_16kb_packet(self):
+        """Constructs and sends an exact 16 KB (16,384 bytes) payload with an incremental counter."""
         if not self.is_running:
             return
         try:
-            self.client_socket.sendall(binary_data)
-            print(f"[SENT] Sent {len(binary_data)} bytes to server.", flush=True)
+            self.send_counter += 1
+            
+            # Pack counter into first 8 bytes (little-endian)
+            counter_bytes = self.send_counter.to_bytes(8, byteorder='little')
+            
+            # Generate remaining bytes to fill exactly 16 KB (16384 - 8 = 16376 bytes)
+            # Using a repeating pattern (e.g., byte pattern of index % 256)
+            payload_body = bytes([i % 256 for i in range(16376)])
+            
+            total_payload = counter_bytes + payload_body
+            assert len(total_payload) == 16384, f"Payload size mismatch: {len(total_payload)}"
+            
+            self.client_socket.sendall(total_payload)
+            print(f"[SENT] 16 KB Packet Sent | Client Counter: #{self.send_counter} | Size: {len(total_payload)} bytes", flush=True)
         except Exception as e:
             print(f"[ERROR] Failed to send data: {e}", flush=True)
             self.disconnect()
 
     def disconnect(self):
-        """Closes connection cleanly."""
         self.is_running = False
         try:
             self.client_socket.close()
@@ -90,17 +96,15 @@ class TCPClient:
             pass
 
 if __name__ == "__main__":
-    # Target Configuration
     SERVER_HOST = "127.0.0.1" 
     SERVER_PORT = 3240
 
     client = TCPClient(SERVER_HOST, SERVER_PORT, timeout=5.0)
     client.connect()
 
-    # CPU-Friendly main thread loop
     try:
         while client.is_running:
-            time.sleep(0.1)  # Free up CPU cycles while waiting
+            time.sleep(0.1)
     except KeyboardInterrupt:
         print("\n[EXITING] User interrupted.", flush=True)
         client.disconnect()

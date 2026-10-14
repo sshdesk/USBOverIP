@@ -39,24 +39,87 @@ public:
             }
         }
     }
-    
-    void OnMessage(const webrtc::DataBuffer& buffer) override {
-        // std::string inbound_text(reinterpret_cast<const char*>(buffer.data.data()), buffer.data.size());
-        // SPDLOG_INFO("PEER MESSAGE: {}", inbound_text);
 
+
+    #if COUNTER
+    void OnMessage(const webrtc::DataBuffer& buffer) override {
         const uint8_t* data_ptr = buffer.data.data();
         size_t data_size = buffer.data.size();
 
-        std::string hex_str;
-        char hex_buf[16];
-        for (size_t i = 0; i < data_size; ++i) {
-            std::snprintf(hex_buf, sizeof(hex_buf), "%02X ", data_ptr[i]);
-            hex_str += hex_buf;
+        // Ensure we received at least an 8-byte counter from the client
+        if (data_size >= sizeof(uint64_t)) {
+            uint64_t client_counter = 0;
+            std::memcpy(&client_counter, data_ptr, sizeof(uint64_t));
+            
+            // Print the incremental number received from the script
+            SPDLOG_INFO("[SERVER RECEIVED] Client Counter #{}", client_counter);
+        } else {
+            SPDLOG_INFO("PEER BINARY MESSAGE [{} bytes]", data_size);
         }
 
-        SPDLOG_INFO("PEER BINARY MESSAGE [{} bytes]: [ {}]", data_size, hex_str);
+        static uint64_t server_packet_counter = 0;
+        uint64_t current_server_count = ++server_packet_counter;
 
+        // Prepare response binary payload containing the server's incrementing counter (8 bytes)
+        std::vector<uint8_t> response_data;
+        const uint8_t* count_bytes = reinterpret_cast<const uint8_t*>(&current_server_count);
+        response_data.insert(response_data.end(), count_bytes, count_bytes + sizeof(current_server_count));
+
+        // Send back binary data over the data channel
+        if (native_data_channel && native_data_channel->state() == webrtc::DataChannelInterface::kOpen) {
+            rtc::CopyOnWriteBuffer reply_buffer(response_data.data(), response_data.size());
+            webrtc::DataBuffer data_buffer(reply_buffer, true); // true = binary mode
+            native_data_channel->Send(data_buffer);
+            
+            // Print the incremental number sent from the server side
+            SPDLOG_INFO("[SERVER SENT] Echo Counter #{}", current_server_count);
+        }
     }
+    #else
+    void OnMessage(const webrtc::DataBuffer& buffer) override {
+        const uint8_t* data_ptr = buffer.data.data();
+        size_t data_size = buffer.data.size();
+
+        SPDLOG_INFO("[SERVER RECEIVED] Binary message chunk size: {} bytes", data_size);
+
+        // Parse client counter from the first 8 bytes if available
+        if (data_size >= sizeof(uint64_t)) {
+            uint64_t client_counter = 0;
+            std::memcpy(&client_counter, data_ptr, sizeof(uint64_t));
+            SPDLOG_INFO("[SERVER RECEIVED] Client Counter #{} embedded in 16KB payload", client_counter);
+        }
+
+        static uint64_t server_packet_counter = 0;
+        uint64_t current_server_count = ++server_packet_counter;
+
+        // Prepare response binary payload totaling 16 KB (16384 bytes)
+        std::vector<uint8_t> response_data;
+        response_data.resize(16384);
+
+        // Copy server counter into the first 8 bytes
+        std::memcpy(response_data.data(), &current_server_count, sizeof(uint64_t));
+
+        // Fill the rest of the 16 KB payload (from index 8 to 16384) with pattern data
+        for (size_t i = 8; i < 16384; ++i) {
+            response_data[i] = static_cast<uint8_t>(i % 256);
+        }
+
+        // Send back the 16 KB binary reply block over the data channel
+        if (native_data_channel && native_data_channel->state() == webrtc::DataChannelInterface::kOpen) {
+            rtc::CopyOnWriteBuffer reply_buffer(response_data.data(), response_data.size());
+            webrtc::DataBuffer data_buffer(reply_buffer, true); // true = binary mode
+            native_data_channel->Send(data_buffer);
+            
+            SPDLOG_INFO("[SERVER SENT] Echo 16 KB Payload | Counter #{} | Size: {} bytes", 
+                        current_server_count, response_data.size());
+        }
+    }
+    #endif 
+
+
+
+
+
     
     void OnBufferedAmountChange(uint64_t previous_amount) override {}
 };

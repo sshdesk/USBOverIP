@@ -1,18 +1,32 @@
 #include "tcptunnel.h"
 #include <iostream>
 #include <spdlog/spdlog.h>
-//#include <GlobalConfig.h>
 
-// Helper macro for cross-platform socket closing and error checking
 #if defined(_WIN32) || defined(_WIN64)
+#include <winsock2.h>
 inline void CloseSocketCrossPlatform(SOCKET s) { closesocket(s); }
 inline int GetLastSocketError() { return WSAGetLastError(); }
 inline bool IsWouldBlockError(int err) { return err == WSAEWOULDBLOCK; }
+inline void SetSocketNonBlocking(SOCKET sock) {
+    u_long mode = 1;
+    ioctlsocket(sock, FIONBIO, &mode);
+}
 #else
+#include <fcntl.h>
 inline void CloseSocketCrossPlatform(SOCKET s) { close(s); }
 inline int GetLastSocketError() { return errno; }
 inline bool IsWouldBlockError(int err) { return err == EWOULDBLOCK || err == EAGAIN; }
+inline void SetSocketNonBlocking(SOCKET sock) {
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+}
 #endif
+
+
+inline void EnableTcpKeepAlive(SOCKET sock) {
+    int opt = 1;
+    setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, reinterpret_cast<const char*>(&opt), sizeof(opt));
+}
 
 WebRtcToTcpTunnel::WebRtcToTcpTunnel(std::atomic<SOCKET>& client_socket, rtc::scoped_refptr<webrtc::DataChannelInterface> data_channel)
   : client_socket_(client_socket)
@@ -22,22 +36,30 @@ WebRtcToTcpTunnel::WebRtcToTcpTunnel(std::atomic<SOCKET>& client_socket, rtc::sc
 
 void WebRtcToTcpTunnel::OnStateChange()
 {
-  SPDLOG_INFO("UsbChannel [ {} ] state changed to: {}", _dataChannel->label(), webrtc::DataChannelInterface::DataStateString(_dataChannel->state()));
+  SPDLOG_INFO("DataChannel [ {} ] state changed to: {}", _dataChannel->label(), webrtc::DataChannelInterface::DataStateString(_dataChannel->state()));
 
   webrtc::DataChannelInterface::DataState state = _dataChannel->state();
-
   if (state == webrtc::DataChannelInterface::kClosed)
   {
     _dataChannel->UnregisterObserver();
-  }
 
-  if (state == webrtc::DataChannelInterface::kOpen)
-  {
+    // Proactively drop and close any active TCP client socket when WebRTC drops
+    SOCKET socket_snap = client_socket_.exchange(INVALID_SOCKET);
+    if (socket_snap != INVALID_SOCKET)
+    {
+      SPDLOG_WARN("WebRTC DataChannel closed. Forcibly closing active TCP client socket.");
+      CloseSocketCrossPlatform(socket_snap);
+    } 
+   
+   if (state == webrtc::DataChannelInterface::kOpen)
+   {
      //Test code
     //std::vector<uint8_t> raw_binary { 1, 2, 3 };
     //rtc::CopyOnWriteBuffer buffer(raw_binary.data(), raw_binary.size());
     //webrtc::DataBuffer data_buffer(buffer, true);
     //_dataChannel->Send(data_buffer);
+    }	
+ 
   }
 }
 
@@ -78,7 +100,7 @@ WebRtcTcpTunnelManager::WebRtcTcpTunnelManager(int port)
   , listen_socket_(INVALID_SOCKET)
   , client_socket_(INVALID_SOCKET)
 {
-  int tcpport =3240;
+  int tcpport = 3240;
   if (tcpport > 1024)
   {
     port_ = tcpport;
@@ -119,8 +141,9 @@ bool WebRtcTcpTunnelManager::Start()
     return false;
   }
 
+  EnableTcpKeepAlive(listen_sock);
+
 #ifndef _WIN32
-  // Allow address reuse on Linux to avoid "Address already in use" error
   int opt = 1;
   setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 #endif
@@ -188,6 +211,8 @@ void WebRtcTcpTunnelManager::RunServerLoop()
     if (client_sock != INVALID_SOCKET)
     {
       SPDLOG_INFO("TCP Local client connected.");
+      EnableTcpKeepAlive(client_sock);
+      SetSocketNonBlocking(client_sock);
 
       SOCKET old_client = client_socket_.exchange(client_sock);
       if (old_client != INVALID_SOCKET)
@@ -201,7 +226,6 @@ void WebRtcTcpTunnelManager::RunServerLoop()
 void WebRtcTcpTunnelManager::HandleDataChannel(rtc::scoped_refptr<webrtc::DataChannelInterface> data_channel, rtc::Thread* webrtc_thread)
 {
   tunnel_observer_ = std::make_unique<WebRtcToTcpTunnel>(client_socket_, data_channel);
-
   data_channel->RegisterObserver(tunnel_observer_.get());
 
   if (proxy_thread_.joinable())
@@ -222,6 +246,13 @@ void WebRtcTcpTunnelManager::RunTcpToWebRtcLoop(rtc::scoped_refptr<webrtc::DataC
     if (socket_snap == INVALID_SOCKET)
     {
       std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      continue;
+    }
+
+    // Guard: Ensure DataChannel is fully open before reading or writing data
+    if (!data_channel || data_channel->state() != webrtc::DataChannelInterface::kOpen)
+    {
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
       continue;
     }
 
