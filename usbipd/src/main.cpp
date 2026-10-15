@@ -1,4 +1,3 @@
-#define _CRT_SECURE_NO_WARNINGS
 #include "usbip_server.h"
 #include "usb_device_passthrough.h"
 #include <stdio.h>

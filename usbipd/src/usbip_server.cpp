@@ -1,5 +1,5 @@
-#define _CRT_SECURE_NO_WARNINGS
 #include "usbip_server.h"
+#include "usbip_log.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,11 +15,17 @@
   #include <sys/types.h>
   #include <sys/socket.h>
   #include <netinet/in.h>
+  #include <netinet/tcp.h>
   #define SOCKET int
   #define INVALID_SOCKET (-1)
   #define SOCKET_ERROR   (-1)
   #define CLOSE_SOCKET(s) close(s)
 #endif
+
+/* Linux errno-style USB/IP status used when a request exceeds the bounded
+ * transfer buffer supported by this server. */
+#define USBIP_STATUS_EOVERFLOW (-75)
+#define USBIP_MAX_TRANSFER_SIZE 262144u
 
 typedef struct {
     usbip_server_t *server;
@@ -97,8 +103,8 @@ static int handle_urb_transfer_loop(usbip_server_t *server, SOCKET sock, usb_dev
     printf("[USB/IP] Attached to device %s. Entering URB transfer loop.\n", dev->busid);
     dev->attached = true;
 
-    uint8_t *payload_in  = (uint8_t *)malloc(262144);
-    uint8_t *payload_out = (uint8_t *)malloc(262144);
+    uint8_t *payload_in  = (uint8_t *)malloc(USBIP_MAX_TRANSFER_SIZE);
+    uint8_t *payload_out = (uint8_t *)malloc(USBIP_MAX_TRANSFER_SIZE);
 
     if (!payload_in || !payload_out) {
         printf("[USB/IP ERROR] Failed to allocate URB payload buffers.\n");
@@ -129,12 +135,12 @@ static int handle_urb_transfer_loop(usbip_server_t *server, SOCKET sock, usb_dev
             uint32_t ep          = ntohl(cmd.ep);
             uint32_t buf_len     = ntohl(cmd.transfer_buffer_length);
 
-            printf("[URB Submit #%u] DevID=0x%08X EP=%u Dir=%s TransferLen=%u\n",
+            USBIP_LOG(3, "[URB Submit #%u] DevID=0x%08X EP=%u Dir=%s TransferLen=%u\n",
                    seqnum, devid, ep, direction == USBIP_DIR_IN ? "IN" : "OUT", buf_len);
 
             /* Read OUT payload if sent from client */
             if (direction == USBIP_DIR_OUT && buf_len > 0) {
-                uint32_t read_len = (buf_len < 262144) ? buf_len : 262144;
+                uint32_t read_len = (buf_len < USBIP_MAX_TRANSFER_SIZE) ? buf_len : USBIP_MAX_TRANSFER_SIZE;
                 if (recv_exact(sock, payload_out, read_len) != 0) {
                     printf("[USB/IP ERROR] Failed to receive OUT payload data.\n");
                     break;
@@ -153,21 +159,27 @@ static int handle_urb_transfer_loop(usbip_server_t *server, SOCKET sock, usb_dev
             uint32_t actual_length = 0;
             int status = 0;
 
-            if (ep == 0) {
+            if (buf_len > USBIP_MAX_TRANSFER_SIZE) {
+                /* Never pass a wire-provided length larger than our backing
+                 * buffers to the device backend. OUT payload has already been
+                 * consumed above so the USB/IP stream remains aligned. */
+                status = USBIP_STATUS_EOVERFLOW;
+                actual_length = 0;
+            } else if (ep == 0) {
                 /* Control transfer on Endpoint 0 */
                 usb_setup_packet_t *setup = (usb_setup_packet_t *)cmd.setup;
-                printf("  [EP0 Setup] bmRequestType=0x%02X bRequest=0x%02X wValue=0x%04X wIndex=0x%04X wLength=%u\n",
+                USBIP_LOG(3, "  [EP0 Setup] bmRequestType=0x%02X bRequest=0x%02X wValue=0x%04X wIndex=0x%04X wLength=%u\n",
                        setup->bmRequestType, setup->bRequest, setup->wValue, setup->wIndex, setup->wLength);
                 status = dev->handle_control_transfer(dev, setup, payload_out, buf_len,
                                                       payload_in, 262144, &actual_length);
 
-                printf("  [EP0 Result] status=%d actual_len=%u\n", status, actual_length);
+                USBIP_LOG(3, "  [EP0 Result] status=%d actual_len=%u\n", status, actual_length);
             } else {
                 /* Data transfer on Bulk / Interrupt endpoint */
                 status = dev->handle_data_transfer(dev, ep, direction, payload_out, buf_len,
                                                    payload_in, 262144, &actual_length);
 
-                printf("  [EP%u %s Result] status=%d actual_len=%u\n", ep, direction == USBIP_DIR_IN ? "IN" : "OUT", status, actual_length);
+                USBIP_LOG(3, "  [EP%u %s Result] status=%d actual_len=%u\n", ep, direction == USBIP_DIR_IN ? "IN" : "OUT", status, actual_length);
             }
 
             /* Send USBIP_RET_SUBMIT (Exact 48 bytes) */
@@ -192,7 +204,7 @@ static int handle_urb_transfer_loop(usbip_server_t *server, SOCKET sock, usb_dev
             }
 
             /* Send IN payload back if requested */
-            if (direction == USBIP_DIR_IN && actual_length > 0) {
+            if (status == 0 && direction == USBIP_DIR_IN && actual_length > 0) {
                 if (send_exact(sock, payload_in, actual_length) != 0) {
                     printf("[USB/IP ERROR] Failed to send IN payload to socket.\n");
                     break;
@@ -207,7 +219,7 @@ static int handle_urb_transfer_loop(usbip_server_t *server, SOCKET sock, usb_dev
                 break;
             }
 
-            printf("  [URB Unlink] seqnum=%u unlink_seqnum=%u\n", ntohl(unlink_cmd.seqnum), ntohl(unlink_cmd.unlink_seqnum));
+            USBIP_LOG(2, "  [URB Unlink] seqnum=%u unlink_seqnum=%u\n", ntohl(unlink_cmd.seqnum), ntohl(unlink_cmd.unlink_seqnum));
 
             usbip_header_ret_unlink_t unlink_ret;
             memset(&unlink_ret, 0, sizeof(unlink_ret));
@@ -421,6 +433,19 @@ int usbip_server_run(usbip_server_t *server) {
         if (client_sock == INVALID_SOCKET) {
             if (!server->running) break;
             continue;
+        }
+
+        /* USB/IP sends many small command/response headers. Disable Nagle on
+         * the accepted stream and raise socket buffers for bulk transfers. */
+        {
+            int no_delay = 1;
+            int socket_buffer = 1024 * 1024;
+            (void)setsockopt(client_sock, IPPROTO_TCP, TCP_NODELAY,
+                             (const char *)&no_delay, sizeof(no_delay));
+            (void)setsockopt(client_sock, SOL_SOCKET, SO_SNDBUF,
+                             (const char *)&socket_buffer, sizeof(socket_buffer));
+            (void)setsockopt(client_sock, SOL_SOCKET, SO_RCVBUF,
+                             (const char *)&socket_buffer, sizeof(socket_buffer));
         }
 
         char client_ip[INET_ADDRSTRLEN];

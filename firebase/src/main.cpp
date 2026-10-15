@@ -8,6 +8,8 @@
 
 #include "signaling.h"
 #include "webrtc_stats.h"
+#include "usbip_server.h"
+#include "usb_device_passthrough.h"
 
 #include "api/create_peerconnection_factory.h"
 #include "api/peer_connection_interface.h"
@@ -18,17 +20,47 @@
 
 #include "tcptunnel.h"
 
-#define COUNTER 1
-
 rtc::scoped_refptr<webrtc::PeerConnectionInterface> peer_connection = nullptr;
 rtc::scoped_refptr<webrtc::DataChannelInterface> native_data_channel = nullptr;
 webrtc::DataChannelObserver* global_dc_observer = nullptr;
 
+usbip_server_t* g_server = nullptr;
 WebRtcTcpTunnelManager tunnel_manager(3240);
 
 std::atomic<bool> keep_running{true};
-std::string shared_input_buffer = "";
-std::mutex input_mutex;
+
+// External C linkage for transmitting data back via DataChannel
+extern "C" {
+    bool webrtc_data_channel_send(rtc_data_channel_t *dc, const void *data, size_t size) {
+        (void)dc;
+        if (!native_data_channel || native_data_channel->state() != webrtc::DataChannelInterface::kOpen) {
+            return false;
+        }
+        rtc::CopyOnWriteBuffer buffer(reinterpret_cast<const uint8_t*>(data), size);
+        webrtc::DataBuffer data_buffer(buffer, true);
+        return native_data_channel->Send(data_buffer);
+    }
+}
+
+void InitializeUsbIpServerSession() {
+    if (g_server) return;
+
+    // Create server instance without hardcoded URL string
+    g_server = usbip_server_create();
+    if (!g_server) {
+        SPDLOG_ERROR("Failed to create USB/IP WebRTC server context.");
+        return;
+    }
+
+    // Register physical USB device passthrough (BusID 3-2, VID:PID)[cite: 3]
+    usb_device_t *dev = usb_device_create_passthrough("3-2", 0x0951, 0x16A1, INVALID_HANDLE_VALUE);
+    if (dev) {
+        usbip_server_register_device(g_server, dev);
+        SPDLOG_INFO("Successfully registered USB passthrough device.");
+    } else {
+        SPDLOG_WARN("Warning: Failed to capture physical USB device during startup.");
+    }
+}
 
 class CustomDataChannelObserver : public webrtc::DataChannelObserver {
 public:
@@ -36,8 +68,27 @@ public:
         if (native_data_channel) {
             SPDLOG_INFO("DataChannel state changed: {}", webrtc::DataChannelInterface::DataStateString(native_data_channel->state()));
             if (native_data_channel->state() == webrtc::DataChannelInterface::kOpen) {
-                SPDLOG_INFO("DataChannel Open! You can now send messages.");
+                SPDLOG_INFO("DataChannel Open! USB/IP TCP tunnel active.");
+                if (g_server) {
+                    usbip_server_on_channel_open(g_server);
+                }
+            } else if (native_data_channel->state() == webrtc::DataChannelInterface::kClosed ||
+                       native_data_channel->state() == webrtc::DataChannelInterface::kClosing) {
+                if (g_server) {
+                    usbip_server_on_channel_closed(g_server);
+                }
             }
+        }
+    }
+
+    void OnMessage(const webrtc::DataBuffer& buffer) override {
+        const uint8_t* data_ptr = buffer.data.data();
+        size_t data_size = buffer.data.size();
+
+        SPDLOG_INFO("PEER BINARY MESSAGE [{} bytes] routed through tunnel", data_size);
+        
+        if (g_server && buffer.binary) {
+            usbip_server_on_data_received(g_server, data_ptr, data_size);
         }
     }
 
@@ -77,52 +128,9 @@ public:
             SPDLOG_INFO("[SERVER SENT] Echo Counter #{}", current_server_count);
         }
     }
-    #else
-    void OnMessage(const webrtc::DataBuffer& buffer) override {
-        const uint8_t* data_ptr = buffer.data.data();
-        size_t data_size = buffer.data.size();
-
-        SPDLOG_INFO("[SERVER RECEIVED] Binary message chunk size: {} bytes", data_size);
-
-        // Parse client counter from the first 8 bytes if available
-        if (data_size >= sizeof(uint64_t)) {
-            uint64_t client_counter = 0;
-            std::memcpy(&client_counter, data_ptr, sizeof(uint64_t));
-            SPDLOG_INFO("[SERVER RECEIVED] Client Counter #{} embedded in 16KB payload", client_counter);
-        }
-
-        static uint64_t server_packet_counter = 0;
-        uint64_t current_server_count = ++server_packet_counter;
-
-        // Prepare response binary payload totaling 16 KB (16384 bytes)
-        std::vector<uint8_t> response_data;
-        response_data.resize(16384);
-
-        // Copy server counter into the first 8 bytes
-        std::memcpy(response_data.data(), &current_server_count, sizeof(uint64_t));
-
-        // Fill the rest of the 16 KB payload (from index 8 to 16384) with pattern data
-        for (size_t i = 8; i < 16384; ++i) {
-            response_data[i] = static_cast<uint8_t>(i % 256);
-        }
-
-        // Send back the 16 KB binary reply block over the data channel
-        if (native_data_channel && native_data_channel->state() == webrtc::DataChannelInterface::kOpen) {
-            rtc::CopyOnWriteBuffer reply_buffer(response_data.data(), response_data.size());
-            webrtc::DataBuffer data_buffer(reply_buffer, true); // true = binary mode
-            native_data_channel->Send(data_buffer);
-            
-            SPDLOG_INFO("[SERVER SENT] Echo 16 KB Payload | Counter #{} | Size: {} bytes", 
-                        current_server_count, response_data.size());
-        }
-    }
-    #endif 
+#endif
 
 
-
-
-
-    
     void OnBufferedAmountChange(uint64_t previous_amount) override {}
 };
 CustomDataChannelObserver data_channel_observer;
@@ -176,7 +184,6 @@ public:
         }
         SPDLOG_INFO("==> [ICE CONNECTION STATE]: {}", state_str);
 
-        // Fetch and print nominated candidate pair statistics when ICE connects
         if (new_state == webrtc::PeerConnectionInterface::kIceConnectionConnected && peer_connection) {
             peer_connection->GetStats(NominatedCandidatePairStatsCallback::Create());
         }
@@ -205,7 +212,14 @@ public:
         native_data_channel = data_channel;
         native_data_channel->RegisterObserver(global_dc_observer);
 
-        // Start the TCP server listener
+        // Initialize USB/IP server session context on remote data channel attachment
+        InitializeUsbIpServerSession();
+
+        if (g_server) {
+            g_server->data_channel = (rtc_data_channel_t*)native_data_channel.get();
+        }
+
+        // Start the TCP server listener for standard USB/IP clients
         if (!tunnel_manager.Start()) {
             SPDLOG_ERROR("Failed to start tunnel manager because TCP bind failed.");
             return;
@@ -230,7 +244,7 @@ int main() {
     SetupLogging(saved_log_level);
     active_tcp_only = tcp_only_flag;
 
-    SPDLOG_INFO("=== Cross-Platform WebRTC Native Signaling App ===");
+    SPDLOG_INFO("=== USB/IP Server over WebRTC TCP Tunnel App ===");
     SPDLOG_INFO("TCP_ONLY Mode: [{}]", active_tcp_only ? "ENABLED" : "DISABLED");
     global_dc_observer = &data_channel_observer;
 
@@ -282,21 +296,22 @@ int main() {
 
     if (choice == 1) {
         webrtc::DataChannelInit dc_config;
-
-
         dc_config.maxRetransmits = std::nullopt; 
         dc_config.maxRetransmitTime = std::nullopt;
+        dc_config.ordered = true; // Strict ordering for USB/IP URB packets
 
-        // 2. Guarantee strict ordering
-        // This ensures packets are delivered to the observer in the exact sequence they were sent.
-        dc_config.ordered = true; 
-
-
-        auto dc_result = peer_connection->CreateDataChannelOrError("chat-channel", &dc_config);
+        auto dc_result = peer_connection->CreateDataChannelOrError("usbip-tcp-channel", &dc_config);
         if (dc_result.ok()) {
             native_data_channel = dc_result.MoveValue();
             native_data_channel->RegisterObserver(global_dc_observer);
-/*
+
+            // Initialize USB/IP server session context on caller creation path
+           // InitializeUsbIpServerSession();
+
+           // if (g_server) {
+             //   g_server->data_channel = (rtc_data_channel_t*)native_data_channel.get();
+         //   }
+
             if (!tunnel_manager.Start()) {
                 SPDLOG_ERROR("Failed to start tunnel manager because TCP bind failed on Caller.");
             } else {
@@ -304,8 +319,6 @@ int main() {
                 rtc::Thread* current_thread = rtc::Thread::Current();
                 tunnel_manager.HandleDataChannel(native_data_channel, current_thread);
             }
-
-*/
         }
 
         if (!saved_room_id.empty()) {
@@ -325,59 +338,20 @@ int main() {
         InitializeCalleeSignaling(input_room);
     }
 
-    std::cout << "\n>>> P2P Engine Active. Type messages below or use '/exit' to quit.\n" << std::endl;
-    
-    std::thread input_thread([&]() {
-        std::cin.ignore();
-        while (keep_running) {
-            std::string temp_input;
-            if (std::getline(std::cin, temp_input)) {
-                if (temp_input == "/exit") {
-                    keep_running = false;
-                    break;
-                }
-                std::lock_guard<std::mutex> lock(input_mutex);
-                shared_input_buffer = temp_input;
-            }
-        }
-    });
+    std::cout << "\n>>> USB/IP Server Active. Press Ctrl+C to quit.\n" << std::endl;
 
     while (keep_running) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        
-        std::string active_msg = "";
-        {
-            std::lock_guard<std::mutex> lock(input_mutex);
-            if (!shared_input_buffer.empty()) {
-                active_msg = shared_input_buffer;
-                shared_input_buffer.clear();
-            }
-        }
-
-        if (!active_msg.empty()) {
-            if (native_data_channel && native_data_channel->state() == webrtc::DataChannelInterface::kOpen) {
-                //webrtc::DataBuffer buffer(active_msg);
-                //native_data_channel->Send(buffer);
-                //SPDLOG_INFO("[Sent]: {}", active_msg);
-
-                 // Sent explicitly as binary payload buffer
-                rtc::CopyOnWriteBuffer buffer(reinterpret_cast<const uint8_t*>(active_msg.data()), active_msg.size());
-                webrtc::DataBuffer data_buffer(buffer, true); 
-                native_data_channel->Send(data_buffer);
-                SPDLOG_INFO("[Sent Binary Data]: {} bytes", active_msg.size());
-
-            } else {
-                SPDLOG_WARN("Data pipeline is not open yet.");
-            }
-        }
-    }
-
-    if (input_thread.joinable()) {
-        input_thread.join();
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
     peer_connection = nullptr;
     native_data_channel = nullptr;
+
+    if (g_server) {
+        usbip_server_destroy(g_server);
+        g_server = nullptr;
+    }
+
     ShutdownFirebaseFramework(nullptr); 
     return 0;
 }

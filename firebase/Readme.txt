@@ -1,10 +1,32 @@
+# widnows build process
+
+cmd 
+
+set GITHUB_TOKEN=ghp_*******************
+
+git submodule update --init
+
+cd src
+python ../conan-deps/src/conan-cache-generator.py --type debug --download --unpack
+
+python ../conan-deps/src/conan-cache-generator.py --build-project --type debug
+
+
+
+
+
+
+
+
+# For linux 
+
+TBD
+
 conan remove firebase-cpp-sdk/13.12.0 --confirm
 
 
 conan create .
 
-
-for windows do python ../conan-deps/src/conan-cache-generator.py --build-project --type debug
 
 
 conan cache clean "openssl/*" --build

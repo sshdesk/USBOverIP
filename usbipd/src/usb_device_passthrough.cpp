@@ -1,6 +1,6 @@
-#define _CRT_SECURE_NO_WARNINGS
 
 #include "usb_device_passthrough.h"
+#include "usbip_log.h"
 #include "vbox_usb.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -732,7 +732,7 @@ static int vbox_send_urb(usb_device_passthrough_t *pt, vbox_usb_urb_t *urb) {
     uint8_t bytes[sizeof(*urb)];
     memcpy(bytes, urb, sizeof(bytes));
 
-    printf("[VBoxUSB] SEND_URB: type=%lu ep=%lu dir=%lu flags=0x%08lX cbData=%llu pvData=0x%llX\n",
+    USBIP_LOG(3, "[VBoxUSB] SEND_URB: type=%lu ep=%lu dir=%lu flags=0x%08lX cbData=%llu pvData=0x%llX\n",
            (unsigned long)urb->uType,
            (unsigned long)urb->uEndpoint,
            (unsigned long)urb->enmDir,
@@ -758,7 +758,7 @@ static int vbox_send_urb(usb_device_passthrough_t *pt, vbox_usb_urb_t *urb) {
 
     memcpy(urb, bytes, sizeof(*urb));
 
-    printf("[VBoxUSB] SEND_URB returned=%lu status=%lu cbData=%llu\n",
+    USBIP_LOG(3, "[VBoxUSB] SEND_URB returned=%lu status=%lu cbData=%llu\n",
            (unsigned long)returned,
            (unsigned long)urb->enmStatus,
            (unsigned long long)urb->cbData);
@@ -767,6 +767,7 @@ static int vbox_send_urb(usb_device_passthrough_t *pt, vbox_usb_urb_t *urb) {
 }
 
 static void dump_bytes(const char *label, const uint8_t *data, size_t len) {
+    if (usbip_log_level() < 3) return;
     if (!data || !len) {
         printf("[VBoxUSB] %s: <empty>\n", label);
         return;
@@ -823,7 +824,7 @@ static int vbox_control(usb_device_passthrough_t *pt,
 
     vbox_usb_urb_t urb;
     memset(&urb, 0, sizeof(urb));
-    printf("[VBoxUSB] MESSAGE ABI: sizeof(URB)=%zu off(type)=%zu off(ep)=%zu off(dir)=%zu off(flags)=%zu off(status)=%zu off(len)=%zu off(buf)=%zu\n",
+    USBIP_LOG(3, "[VBoxUSB] MESSAGE ABI: sizeof(URB)=%zu off(type)=%zu off(ep)=%zu off(dir)=%zu off(flags)=%zu off(status)=%zu off(len)=%zu off(buf)=%zu\n",
            sizeof(urb), offsetof(vbox_usb_urb_t, uType),
            offsetof(vbox_usb_urb_t, uEndpoint), offsetof(vbox_usb_urb_t, enmDir),
            offsetof(vbox_usb_urb_t, fFlags), offsetof(vbox_usb_urb_t, enmStatus),
@@ -864,7 +865,7 @@ static int vbox_control(usb_device_passthrough_t *pt,
         if (actual > requested) actual = requested;
         if (actual) memcpy(in_data, buffer + 8, (size_t)actual);
         *actual_in_len = (uint32_t)actual;
-        printf("[VBoxUSB] Control IN actual payload=%u bytes\n", *actual_in_len);
+        USBIP_LOG(3, "[VBoxUSB] Control IN actual payload=%u bytes\n", *actual_in_len);
     } else if (rc == 0) {
         uint64_t actual = urb.cbData >= 8 ? urb.cbData - 8 : 0;
         if (actual > out_len) actual = out_len;

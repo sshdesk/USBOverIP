@@ -3,32 +3,47 @@ cmake_minimum_required(VERSION 3.15)
 project(usbip_server_cpp CXX)
 
 
-set(CMAKE_CXX_STANDARD 11)
+
+# This project uses the Windows VBoxUSB/VBoxUSBMon driver stack and Win32 APIs.
+if(NOT WIN32)
+    message(FATAL_ERROR "This USB/IP passthrough server requires Windows and the VBoxUSB/VBoxUSBMon driver stack.")
+endif()
+
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
-
-# Dynamically target the 'bin' folder in the source root
-set(OUTPUT_BIN_DIR "${CMAKE_SOURCE_DIR}/bin")
-
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${OUTPUT_BIN_DIR})
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG ${OUTPUT_BIN_DIR})
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE ${OUTPUT_BIN_DIR})
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL ${OUTPUT_BIN_DIR})
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO ${OUTPUT_BIN_DIR})
-
-include_directories(include)
-
-set(SOURCES
+add_executable(usbip_server
     src/main.cpp
     src/usb_device_hid.cpp
     src/usb_device_passthrough.cpp
     src/usbip_server.cpp
 )
 
-add_executable(usbip_server ${SOURCES})
+target_include_directories(usbip_server PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_compile_definitions(usbip_server PRIVATE _CRT_SECURE_NO_WARNINGS WIN32_LEAN_AND_MEAN NOMINMAX)
 
-if(WIN32)
-    target_link_libraries(usbip_server ws2_32 advapi32 setupapi cfgmgr32)
+if(MSVC)
+    target_compile_options(usbip_server PRIVATE /W4 /O2 /EHsc)
 else()
-    target_link_libraries(usbip_server pthread)
+    target_compile_options(usbip_server PRIVATE -Wall -Wextra -O2)
 endif()
+
+target_link_libraries(usbip_server PRIVATE
+    ws2_32
+    advapi32
+    setupapi
+    cfgmgr32
+)
+
+set_target_properties(usbip_server PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+# Keep multi-configuration Visual Studio generators consistent too.
+foreach(config Debug Release RelWithDebInfo MinSizeRel)
+    string(TOUPPER "${config}" config_upper)
+    set_target_properties(usbip_server PROPERTIES
+        "RUNTIME_OUTPUT_DIRECTORY_${config_upper}" "${CMAKE_BINARY_DIR}/bin"
+    )
+endforeach()

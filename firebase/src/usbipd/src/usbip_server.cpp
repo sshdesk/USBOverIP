@@ -10,12 +10,7 @@
 #include <unistd.h>
 #endif
 
-// External bindings to your C++ Firebase REST/SDK and libwebrtc implementation layer
 extern "C" {
-    bool firebase_init(const char *database_url);
-    void firebase_publish_offer(const char *busid, const char *sdp);
-    void firebase_listen_for_answer(const char *busid, void (*on_answer)(const char *sdp));
-    bool webrtc_init_peer_connection(usbip_server_t *server);
     bool webrtc_data_channel_send(rtc_data_channel_t *dc, const void *data, size_t size);
 }
 
@@ -45,10 +40,8 @@ static usb_device_t *get_attached_device(usbip_server_t *server) {
     return NULL;
 }
 
-// Core USB/IP packet router triggered when binary data frames arrive via WebRTC DataChannel
 void usbip_server_on_data_received(usbip_server_t *server, const uint8_t *data, size_t size) {
     if (!server->running || !server->client_connected) return;
-
     if (size < sizeof(uint32_t)) return;
 
     uint32_t cmd_code_net = 0;
@@ -216,21 +209,21 @@ void usbip_server_on_data_received(usbip_server_t *server, const uint8_t *data, 
 void usbip_server_on_channel_open(usbip_server_t *server) {
     printf("[WebRTC] Data Channel connected via Firebase signaling. Ready for USB/IP traffic.\n");
     server->client_connected = true;
+    server->running = true;
 }
 
 void usbip_server_on_channel_closed(usbip_server_t *server) {
     printf("[WebRTC] Data Channel disconnected.\n");
     server->client_connected = false;
+    server->running = false;
     for (int i = 0; i < server->num_devices; ++i) {
         server->devices[i]->attached = false;
     }
 }
 
-usbip_server_t *usbip_server_create(const char *firebase_url) {
+usbip_server_t *usbip_server_create(void) {
     usbip_server_t *server = (usbip_server_t *)calloc(1, sizeof(usbip_server_t));
     if (!server) return NULL;
-
-    strncpy(server->firebase_url, firebase_url ? firebase_url : "", sizeof(server->firebase_url) - 1);
     server->running = false;
     server->client_connected = false;
     return server;
@@ -252,44 +245,8 @@ int usbip_server_register_device(usbip_server_t *server, usb_device_t *dev) {
     return 0;
 }
 
-int usbip_server_run(usbip_server_t *server) {
-    if (!server) return -1;
-
-    if (!firebase_init(server->firebase_url)) {
-        fprintf(stderr, "[Error] Failed to connect to Firebase database endpoint.\n");
-        return -1;
-    }
-
-    if (!webrtc_init_peer_connection(server)) {
-        fprintf(stderr, "[Error] Failed to initialize libwebrtc peer connection context.\n");
-        return -1;
-    }
-
-    server->running = true;
-    printf("==================================================\n");
-    printf(" USB/IP Daemon (Firebase + LibWebRTC DataChannel)\n");
-    printf(" Exported devices: %d\n", server->num_devices);
-    for (int i = 0; i < server->num_devices; ++i) {
-        printf("   - BusID: %s (%04x:%04x)\n",
-               server->devices[i]->busid,
-               server->devices[i]->desc.idVendor,
-               server->devices[i]->desc.idProduct);
-    }
-    printf("==================================================\n");
-
-    while (server->running) {
-#ifdef _WIN32
-        Sleep(100);
-#else
-        usleep(100000);
-#endif
-    }
-
-    return 0;
-}
-
 void usbip_server_stop(usbip_server_t *server) {
-    if (server && server->running) {
+    if (server) {
         server->running = false;
         server->client_connected = false;
     }
