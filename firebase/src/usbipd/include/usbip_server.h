@@ -1,0 +1,38 @@
+#ifndef USBIP_SERVER_H
+#define USBIP_SERVER_H
+
+#include "usbip_protocol.h"
+#include "usb_device.h"
+#include <stdbool.h>
+
+#define MAX_DEVICES 8
+
+// Opaque wrappers for libwebrtc and Firebase structures
+typedef struct rtc_peer_connection rtc_peer_connection_t;
+typedef struct rtc_data_channel    rtc_data_channel_t;
+
+typedef struct {
+    usb_device_t         *devices[MAX_DEVICES];
+    int                   num_devices;
+    volatile bool         running;
+
+    // WebRTC & Firebase state
+    rtc_peer_connection_t *peer_connection;
+    rtc_data_channel_t    *data_channel;
+    bool                  client_connected;
+    char                  firebase_url[256];
+} usbip_server_t;
+
+usbip_server_t *usbip_server_create(const char *firebase_url);
+void usbip_server_destroy(usbip_server_t *server);
+
+int  usbip_server_register_device(usbip_server_t *server, usb_device_t *dev);
+int  usbip_server_run(usbip_server_t *server);
+void usbip_server_stop(usbip_server_t *server);
+
+// Callbacks driven by WebRTC DataChannel & Firebase Signaling wrapper
+void usbip_server_on_data_received(usbip_server_t *server, const uint8_t *data, size_t size);
+void usbip_server_on_channel_open(usbip_server_t *server);
+void usbip_server_on_channel_closed(usbip_server_t *server);
+
+#endif /* USBIP_SERVER_H */

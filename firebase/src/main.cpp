@@ -18,6 +18,7 @@
 
 #include "tcptunnel.h"
 
+#define COUNTER 1
 
 rtc::scoped_refptr<webrtc::PeerConnectionInterface> peer_connection = nullptr;
 rtc::scoped_refptr<webrtc::DataChannelInterface> native_data_channel = nullptr;
@@ -42,6 +43,7 @@ public:
 
 
     #if COUNTER
+    
     void OnMessage(const webrtc::DataBuffer& buffer) override {
         const uint8_t* data_ptr = buffer.data.data();
         size_t data_size = buffer.data.size();

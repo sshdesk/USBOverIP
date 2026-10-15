@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(WebRtcFirebaseSignaling VERSION 1.0 LANGUAGES CXX)
+project(usbip_server VERSION 1.0 LANGUAGES CXX)
 
 # Coordinated standard (Aligned to 17 to prevent Conan package warnings)
 set(CMAKE_CXX_STANDARD 17)
@@ -46,6 +46,17 @@ add_executable(webrtc_signaling_app
     signaling.cpp
     webrtc_stats.cpp
     tcptunnel.cpp
+
+    # USBIPD Source Files
+    #usbipd/src/main.cpp 
+    usbipd/src/usb_device_hid.cpp  
+    usbipd/src/usb_device_passthrough.cpp  
+    usbipd/src/usbip_server.cpp  
+)
+
+# Add include directories for USBIPD headers
+target_include_directories(webrtc_signaling_app PRIVATE
+    usbipd/include
 )
 
 if(WIN32)
