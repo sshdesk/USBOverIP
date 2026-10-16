@@ -140,15 +140,18 @@ else()
     message(WARNING "google-services.json not found in source directory: ${CMAKE_CURRENT_SOURCE_DIR}")
 endif()
 
-# Copy and Install Python Scripts
+# Copy and Install Python Scripts from ../script directory
 set(PYTHON_SCRIPTS
     port_forwarding_counter.py
     port_forwarding_test_16KB.py
     usb-ip.py
 )
 
+set(PYTHON_SCRIPTS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../script")
+
 foreach(SCRIPT ${PYTHON_SCRIPTS})
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${SCRIPT}")
+    set(SCRIPT_PATH "${PYTHON_SCRIPTS_DIR}/${SCRIPT}")
+    if(EXISTS "${SCRIPT_PATH}")
         if(NOT DEFINED FB_OUTPUT_CONFIG)
             if(CMAKE_BUILD_TYPE STREQUAL "Release")
                 set(FB_OUTPUT_CONFIG "Release")
@@ -158,17 +161,23 @@ foreach(SCRIPT ${PYTHON_SCRIPTS})
         endif()
         
         configure_file(
-            "${CMAKE_CURRENT_SOURCE_DIR}/${SCRIPT}"
+            "${SCRIPT_PATH}"
             "${CMAKE_BINARY_DIR}/${FB_OUTPUT_CONFIG}/${SCRIPT}"
             COPYONLY
         )
         
+        configure_file(
+            "${SCRIPT_PATH}"
+            "${CMAKE_BINARY_DIR}/${SCRIPT}"
+            COPYONLY
+        )
+        
         install(
-            FILES "${CMAKE_CURRENT_SOURCE_DIR}/${SCRIPT}"
+            FILES "${SCRIPT_PATH}"
             DESTINATION bin
         )
     else()
-        message(WARNING "${SCRIPT} not found in source directory: ${CMAKE_CURRENT_SOURCE_DIR}")
+        message(WARNING "${SCRIPT} not found in script directory: ${PYTHON_SCRIPTS_DIR}")
     endif()
 endforeach()
 

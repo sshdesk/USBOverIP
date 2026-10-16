@@ -244,6 +244,8 @@ int main() {
     SetupLogging(saved_log_level);
     active_tcp_only = tcp_only_flag;
 
+    rtc::LogMessage::LogToDebug(rtc::LoggingSeverity::LS_ERROR);
+
     SPDLOG_INFO("=== USB/IP Server over WebRTC TCP Tunnel App ===");
     SPDLOG_INFO("TCP_ONLY Mode: [{}]", active_tcp_only ? "ENABLED" : "DISABLED");
     global_dc_observer = &data_channel_observer;
