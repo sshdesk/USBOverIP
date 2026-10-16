@@ -46,6 +46,7 @@ add_executable(usbipd
     signaling.cpp
     webrtc_stats.cpp
     tcptunnel.cpp
+    vbox_service_manager.cpp
 
     # USBIPD Source Files
     usbipd/src/usb_device_hid.cpp  

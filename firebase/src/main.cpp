@@ -5,6 +5,7 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <csignal>
 
 #include "signaling.h"
 #include "webrtc_stats.h"
@@ -17,7 +18,7 @@
 
 #include "firebase/app.h"
 #include "firebase/firestore.h"
-
+#include "vbox_service_manager.h"
 #include "tcptunnel.h"
 
 //#define COUNTER 1
@@ -30,6 +31,18 @@ usbip_server_t* g_server = nullptr;
 WebRtcTcpTunnelManager tunnel_manager(3240);
 
 std::atomic<bool> keep_running{true};
+std::atomic<bool> restart_session{false};
+int global_choice = 1;
+rtc::Thread* global_signaling_thread_ptr = nullptr;
+std::string global_saved_room_id;
+std::string global_saved_log_level;
+
+// Signal handler for Ctrl+C (SIGINT)
+void SignalHandler(int signum) {
+    SPDLOG_WARN("Interrupt signal ({}) received. Shutting down gracefully...", signum);
+    keep_running = false;
+    restart_session = false; // Stop any pending restart cycle so it proceeds to exit teardown
+}
 
 // External C linkage for transmitting data back via DataChannel
 extern "C" {
@@ -83,20 +96,14 @@ public:
         }
     }
 
-
-
-    #if COUNTER
-    
+#if COUNTER
     void OnMessage(const webrtc::DataBuffer& buffer) override {
         const uint8_t* data_ptr = buffer.data.data();
         size_t data_size = buffer.data.size();
 
-        // Ensure we received at least an 8-byte counter from the client
         if (data_size >= sizeof(uint64_t)) {
             uint64_t client_counter = 0;
             std::memcpy(&client_counter, data_ptr, sizeof(uint64_t));
-            
-            // Print the incremental number received from the script
             SPDLOG_INFO("[SERVER RECEIVED] Client Counter #{}", client_counter);
         } else {
             SPDLOG_INFO("PEER BINARY MESSAGE [{} bytes]", data_size);
@@ -105,18 +112,14 @@ public:
         static uint64_t server_packet_counter = 0;
         uint64_t current_server_count = ++server_packet_counter;
 
-        // Prepare response binary payload containing the server's incrementing counter (8 bytes)
         std::vector<uint8_t> response_data;
         const uint8_t* count_bytes = reinterpret_cast<const uint8_t*>(&current_server_count);
         response_data.insert(response_data.end(), count_bytes, count_bytes + sizeof(current_server_count));
 
-        // Send back binary data over the data channel
         if (native_data_channel && native_data_channel->state() == webrtc::DataChannelInterface::kOpen) {
             rtc::CopyOnWriteBuffer reply_buffer(response_data.data(), response_data.size());
-            webrtc::DataBuffer data_buffer(reply_buffer, true); // true = binary mode
+            webrtc::DataBuffer data_buffer(reply_buffer, true);
             native_data_channel->Send(data_buffer);
-            
-            // Print the incremental number sent from the server side
             SPDLOG_INFO("[SERVER SENT] Echo Counter #{}", current_server_count);
         }
     }
@@ -125,16 +128,13 @@ public:
       const uint8_t *data_ptr = buffer.data.data();
       size_t data_size = buffer.data.size();
 
-      SPDLOG_INFO("PEER BINARY MESSAGE [{} bytes] routed through data channel",
-                  data_size);
+      SPDLOG_INFO("PEER BINARY MESSAGE [{} bytes] routed through data channel", data_size);
 
       if (g_server && buffer.binary) {
         usbip_server_on_data_received(g_server, data_ptr, data_size);
       }
     }
-
 #endif
-
 
     void OnBufferedAmountChange(uint64_t previous_amount) override {}
 };
@@ -179,10 +179,10 @@ public:
         std::string state_str;
         switch (new_state) {
             case webrtc::PeerConnectionInterface::kIceConnectionNew:          state_str = "NEW"; break;
-            case webrtc::PeerConnectionInterface::kIceConnectionChecking:     state_str = "CHECKING (Pairing candidate checks in progress)"; break;
-            case webrtc::PeerConnectionInterface::kIceConnectionConnected:    state_str = "CONNECTED (Pair Nominated & Selected)"; break;
-            case webrtc::PeerConnectionInterface::kIceConnectionCompleted:    state_str = "COMPLETED (All ICE checks completed)"; break;
-            case webrtc::PeerConnectionInterface::kIceConnectionFailed:       state_str = "FAILED (Candidate pairing timed out)"; break;
+            case webrtc::PeerConnectionInterface::kIceConnectionChecking:     state_str = "CHECKING"; break;
+            case webrtc::PeerConnectionInterface::kIceConnectionConnected:    state_str = "CONNECTED"; break;
+            case webrtc::PeerConnectionInterface::kIceConnectionCompleted:    state_str = "COMPLETED"; break;
+            case webrtc::PeerConnectionInterface::kIceConnectionFailed:       state_str = "FAILED"; break;
             case webrtc::PeerConnectionInterface::kIceConnectionDisconnected: state_str = "DISCONNECTED"; break;
             case webrtc::PeerConnectionInterface::kIceConnectionClosed:       state_str = "CLOSED"; break;
             default: state_str = "UNKNOWN"; break;
@@ -203,13 +203,21 @@ public:
         std::string pc_state;
         switch (new_state) {
             case webrtc::PeerConnectionInterface::PeerConnectionState::kNew:          pc_state = "New"; break;
-            case webrtc::PeerConnectionInterface::PeerConnectionState::kConnecting:   pc_state = "Connecting (DTLS Handshake processing)"; break;
-            case webrtc::PeerConnectionInterface::PeerConnectionState::kConnected:    pc_state = "Connected (DTLS Secure Handshake Complete, P2P Ready)"; break;
+            case webrtc::PeerConnectionInterface::PeerConnectionState::kConnecting:   pc_state = "Connecting"; break;
+            case webrtc::PeerConnectionInterface::PeerConnectionState::kConnected:    pc_state = "Connected"; break;
             case webrtc::PeerConnectionInterface::PeerConnectionState::kDisconnected: pc_state = "Disconnected"; break;
             case webrtc::PeerConnectionInterface::PeerConnectionState::kFailed:       pc_state = "Failed"; break;
             case webrtc::PeerConnectionInterface::PeerConnectionState::kClosed:       pc_state = "Closed"; break;
         }
         SPDLOG_INFO("==> [PEER CONNECTION STATE]: {}", pc_state);
+
+        // Trigger session restart when client disconnects, fails, or closes
+        if (new_state == webrtc::PeerConnectionInterface::PeerConnectionState::kDisconnected ||
+            new_state == webrtc::PeerConnectionInterface::PeerConnectionState::kFailed ||
+            new_state == webrtc::PeerConnectionInterface::PeerConnectionState::kClosed) {
+            SPDLOG_WARN("Peer connection state indicates client disconnection. Scheduling session restart...");
+            restart_session = true;
+        }
     }
 
     void OnDataChannel(rtc::scoped_refptr<webrtc::DataChannelInterface> data_channel) override {
@@ -217,22 +225,11 @@ public:
         native_data_channel = data_channel;
         native_data_channel->RegisterObserver(global_dc_observer);
 
-        // Initialize USB/IP server session context on remote data channel attachment
         InitializeUsbIpServerSession();
 
         if (g_server) {
             g_server->data_channel = (rtc_data_channel_t*)native_data_channel.get();
         }
-
-        // Start the TCP server listener for standard USB/IP clients
-   /*     if (!tunnel_manager.Start()) {
-            SPDLOG_ERROR("Failed to start tunnel manager because TCP bind failed.");
-            return;
-        }
-
-        SPDLOG_INFO("WebRTC Remote peer opened DataChannel. Linking to TCP tunnel manager...");
-        rtc::Thread* current_thread = rtc::Thread::Current();
-        tunnel_manager.HandleDataChannel(data_channel, current_thread);*/
     }
 
     void OnSignalingChange(webrtc::PeerConnectionInterface::SignalingState new_state) override {}
@@ -242,11 +239,15 @@ public:
 CustomPeerConnectionObserver peer_connection_observer;
 
 int main() {
-    std::string saved_room_id, saved_log_level;
+    // Register Ctrl+C (SIGINT) handler for graceful shutdown
+    std::signal(SIGINT, SignalHandler);
+
     bool tcp_only_flag = false;
+
+    std::unique_ptr<ScopedVBoxServiceManager> vbox_guard = nullptr;
     
-    LoadConfigFromDisk(saved_room_id, saved_log_level, tcp_only_flag);
-    SetupLogging(saved_log_level);
+    LoadConfigFromDisk(global_saved_room_id, global_saved_log_level, tcp_only_flag);
+    SetupLogging(global_saved_log_level);
     active_tcp_only = tcp_only_flag;
 
     rtc::LogMessage::LogToDebug(rtc::LoggingSeverity::LS_ERROR);
@@ -265,6 +266,8 @@ int main() {
     std::unique_ptr<rtc::Thread> worker_thread = rtc::Thread::Create();
     std::unique_ptr<rtc::Thread> signaling_thread = rtc::Thread::Create();
     network_thread->Start(); worker_thread->Start(); signaling_thread->Start();
+
+    global_signaling_thread_ptr = signaling_thread.get();
 
     webrtc::PeerConnectionInterface::RTCConfiguration config;
     webrtc::PeerConnectionInterface::IceServer server;
@@ -292,80 +295,101 @@ int main() {
         return -1;
     }
 
-    webrtc::PeerConnectionDependencies dependencies(&peer_connection_observer);
-    auto pc_result = factory->CreatePeerConnectionOrError(config, std::move(dependencies));
-    if (!pc_result.ok()) return -1;
-    peer_connection = pc_result.MoveValue();
-
     std::cout << "\nSelect Execution Profile:\n1. Host Room (Caller Mode)\n2. Connect Room (Callee Mode)\nChoice: ";
-    int choice;
-    std::cin >> choice;
+    std::cin >> global_choice;
 
-    if (choice == 1) {
-        webrtc::DataChannelInit dc_config;
-        dc_config.maxRetransmits = std::nullopt; 
-        dc_config.maxRetransmitTime = std::nullopt;
-        dc_config.ordered = true; // Strict ordering for USB/IP URB packets
+    // Initial setup lambda/block helper
+    auto initialize_session = [&]() {
+        webrtc::PeerConnectionDependencies dependencies(&peer_connection_observer);
+        auto pc_result = factory->CreatePeerConnectionOrError(config, std::move(dependencies));
+        if (!pc_result.ok()) {
+            SPDLOG_ERROR("Failed to create PeerConnection.");
+            return;
+        }
+        peer_connection = pc_result.MoveValue();
 
-        auto dc_result = peer_connection->CreateDataChannelOrError("usbip-tcp-channel", &dc_config);
-        if (dc_result.ok()) {
-            native_data_channel = dc_result.MoveValue();
-            native_data_channel->RegisterObserver(global_dc_observer);
+        if (global_choice == 1) {
+            webrtc::DataChannelInit dc_config;
+            dc_config.maxRetransmits = std::nullopt; 
+            dc_config.maxRetransmitTime = std::nullopt;
+            dc_config.ordered = true;
 
-            if (!tunnel_manager.Start()) {
-                SPDLOG_ERROR("Failed to start tunnel manager because TCP bind failed on Caller.");
+            auto dc_result = peer_connection->CreateDataChannelOrError("usbip-tcp-channel", &dc_config);
+            if (dc_result.ok()) {
+                native_data_channel = dc_result.MoveValue();
+                native_data_channel->RegisterObserver(global_dc_observer);
+
+                if (!tunnel_manager.Start()) {
+                    SPDLOG_ERROR("Failed to start tunnel manager because TCP bind failed on Caller.");
+                } else {
+                    SPDLOG_INFO("Caller DataChannel created. Linking to TCP tunnel manager...");
+                    tunnel_manager.HandleDataChannel(native_data_channel, global_signaling_thread_ptr);
+                }
+            }
+
+            if (!global_saved_room_id.empty()) {
+                SPDLOG_INFO("Found cached room ID: {}. Validating with Firebase...", global_saved_room_id);
+                ValidateAndInitializeCaller(global_saved_room_id);
             } else {
-                SPDLOG_INFO("Caller DataChannel created. Linking to TCP tunnel manager...");
-                // rtc::Thread* current_thread = rtc::Thread::Current();
-                // tunnel_manager.HandleDataChannel(native_data_channel, current_thread);
-                tunnel_manager.HandleDataChannel(native_data_channel, signaling_thread.get());
-                
+                SPDLOG_INFO("No saved room found. Creating new room...");
+                peer_connection->CreateOffer(
+                    new rtc::RefCountedObject<CallerCreateSessionDescriptionObserver>(), 
+                    webrtc::PeerConnectionInterface::RTCOfferAnswerOptions()
+                );
             }
-        }
-
-        if (!saved_room_id.empty()) {
-            SPDLOG_INFO("Found cached room ID: {}. Validating with Firebase...", saved_room_id);
-            ValidateAndInitializeCaller(saved_room_id);
         } else {
-            SPDLOG_INFO("No saved room found. Creating new room...");
-            peer_connection->CreateOffer(
-                new rtc::RefCountedObject<CallerCreateSessionDescriptionObserver>(), 
-                webrtc::PeerConnectionInterface::RTCOfferAnswerOptions()
-            );
-        }
-    } else {
-        std::string input_room;
-        
-        // Check if room ID / token is already available in the settings/config file
-        if (!saved_room_id.empty()) {
-            char use_saved = 'y';
-            std::cout << "Found cached room identifier token in settings file: [" << saved_room_id << "]\n";
-            std::cout << "Do you want to use this saved token? (y/n): ";
-            std::cin >> use_saved;
-            
-            if (use_saved == 'y' || use_saved == 'Y') {
-                input_room = saved_room_id;
+            vbox_guard = std::make_unique<ScopedVBoxServiceManager>();
+
+            std::string input_room;
+            if (!global_saved_room_id.empty()) {
+                char use_saved = 'y';
+                std::cout << "Found cached room identifier token in settings file: [" << global_saved_room_id << "]\n";
+                std::cout << "Do you want to use this saved token? (y/n): ";
+                std::cin >> use_saved;
+                
+                if (use_saved == 'y' || use_saved == 'Y') {
+                    input_room = global_saved_room_id;
+                }
             }
-        }
 
-        // If not available or declined, prompt the user for input
-        if (input_room.empty()) {
-            std::cout << "Enter target room identifier string token: ";
-            std::cin >> input_room;
-        }
+            if (input_room.empty()) {
+                std::cout << "Enter target room identifier string token: ";
+                std::cin >> input_room;
+            }
 
-        // Save the chosen room token back to disk via SaveConfigToDisk
-        SaveConfigToDisk(input_room, saved_log_level, active_tcp_only);
-        
-        InitializeCalleeSignaling(input_room);
-    }
+            SaveConfigToDisk(input_room, global_saved_log_level, active_tcp_only);
+            InitializeCalleeSignaling(input_room);
+        }
+    };
+
+    // Run initial session
+    initialize_session();
 
     std::cout << "\n>>> USB/IP Server Active. Press Ctrl+C to quit.\n" << std::endl;
 
     while (keep_running) {
+        if (restart_session) {
+            restart_session = false;
+            SPDLOG_INFO("=== CLIENT DISCONNECTED: Restarting Server & Tunnel Manager ===");
+
+            tunnel_manager.Stop();
+
+            native_data_channel = nullptr;
+            peer_connection = nullptr;
+
+            if (g_server) {
+                usbip_server_on_channel_closed(g_server);
+            }
+
+            initialize_session();
+            SPDLOG_INFO("=== Server session restarted successfully ===");
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
+    // Final shutdown teardown on Ctrl+C exit
+    SPDLOG_INFO("Performing final cleanup teardown...");
+    tunnel_manager.Stop();
     peer_connection = nullptr;
     native_data_channel = nullptr;
 
@@ -375,5 +399,6 @@ int main() {
     }
 
     ShutdownFirebaseFramework(nullptr); 
+    SPDLOG_INFO("Application exited cleanly.");
     return 0;
 }
