@@ -212,6 +212,7 @@ static int handle_urb_transfer_loop(usbip_server_t *server, usb_device_t *dev) {
                                                    payload_in, 262144, &actual_length);
             }
 
+            /* Send USBIP_RET_SUBMIT header (48 bytes) - exact match */
             usbip_header_ret_submit_t ret;
             memset(&ret, 0, sizeof(ret));
             ret.command       = htonl(USBIP_RET_SUBMIT);
@@ -226,6 +227,7 @@ static int handle_urb_transfer_loop(usbip_server_t *server, usb_device_t *dev) {
                 break;
             }
 
+            /* Send IN payload back if requested - exact match */
             if (status == 0 && direction == USBIP_DIR_IN && actual_length > 0) {
                 if (send_exact_rtc(server, payload_in, actual_length) != 0) {
                     break;

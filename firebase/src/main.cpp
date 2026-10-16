@@ -305,13 +305,6 @@ int main() {
             native_data_channel = dc_result.MoveValue();
             native_data_channel->RegisterObserver(global_dc_observer);
 
-            // Initialize USB/IP server session context on caller creation path
-           // InitializeUsbIpServerSession();
-
-           // if (g_server) {
-             //   g_server->data_channel = (rtc_data_channel_t*)native_data_channel.get();
-         //   }
-
             if (!tunnel_manager.Start()) {
                 SPDLOG_ERROR("Failed to start tunnel manager because TCP bind failed on Caller.");
             } else {
@@ -333,8 +326,28 @@ int main() {
         }
     } else {
         std::string input_room;
-        std::cout << "Enter target room identifier string token: ";
-        std::cin >> input_room;
+        
+        // Check if room ID / token is already available in the settings/config file
+        if (!saved_room_id.empty()) {
+            char use_saved = 'y';
+            std::cout << "Found cached room identifier token in settings file: [" << saved_room_id << "]\n";
+            std::cout << "Do you want to use this saved token? (y/n): ";
+            std::cin >> use_saved;
+            
+            if (use_saved == 'y' || use_saved == 'Y') {
+                input_room = saved_room_id;
+            }
+        }
+
+        // If not available or declined, prompt the user for input
+        if (input_room.empty()) {
+            std::cout << "Enter target room identifier string token: ";
+            std::cin >> input_room;
+        }
+
+        // Save the chosen room token back to disk via SaveConfigToDisk
+        SaveConfigToDisk(input_room, saved_log_level, active_tcp_only);
+        
         InitializeCalleeSignaling(input_room);
     }
 
