@@ -4,13 +4,15 @@
 #include "usbip_protocol.h"
 #include "usb_device.h"
 #include <stdbool.h>
+#include <windows.h>
 
 #define MAX_DEVICES 8
 
 typedef struct rtc_peer_connection rtc_peer_connection_t;
 typedef struct rtc_data_channel    rtc_data_channel_t;
+typedef struct ring_buffer         ring_buffer_t;
 
-typedef struct {
+struct usbip_server_t {
     usb_device_t         *devices[MAX_DEVICES];
     int                   num_devices;
     volatile bool         running;
@@ -18,7 +20,14 @@ typedef struct {
     rtc_peer_connection_t *peer_connection;
     rtc_data_channel_t    *data_channel;
     bool                  client_connected;
-} usbip_server_t;
+
+    ring_buffer_t         *rx_buffer;
+    CRITICAL_SECTION       lock;
+    HANDLE                 worker_thread;
+    volatile bool          worker_running;
+};
+
+typedef struct usbip_server_t usbip_server_t;
 
 usbip_server_t *usbip_server_create(void);
 void usbip_server_destroy(usbip_server_t *server);

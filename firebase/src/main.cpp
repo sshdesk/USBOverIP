@@ -31,7 +31,7 @@ std::atomic<bool> keep_running{true};
 
 // External C linkage for transmitting data back via DataChannel
 extern "C" {
-    bool webrtc_data_channel_send(rtc_data_channel_t *dc, const void *data, size_t size) {
+bool rtc_data_channel_send(rtc_data_channel_t *dc, const void *data, size_t size) {
         (void)dc;
         if (!native_data_channel || native_data_channel->state() != webrtc::DataChannelInterface::kOpen) {
             return false;
@@ -52,8 +52,8 @@ void InitializeUsbIpServerSession() {
         return;
     }
 
-    // Register physical USB device passthrough (BusID 3-2, VID:PID)[cite: 3]
-    usb_device_t *dev = usb_device_create_passthrough("3-2", 0x0951, 0x16A1, INVALID_HANDLE_VALUE);
+    // Register physical USB device passthrough (BusID 3-2, VID:PID) for mass storage 1-10   0781:558a 
+    usb_device_t *dev = usb_device_create_passthrough("1-10", 0x0781, 0x558A, INVALID_HANDLE_VALUE);
     if (dev) {
         usbip_server_register_device(g_server, dev);
         SPDLOG_INFO("Successfully registered USB passthrough device.");
@@ -220,14 +220,14 @@ public:
         }
 
         // Start the TCP server listener for standard USB/IP clients
-        if (!tunnel_manager.Start()) {
+   /*     if (!tunnel_manager.Start()) {
             SPDLOG_ERROR("Failed to start tunnel manager because TCP bind failed.");
             return;
         }
 
         SPDLOG_INFO("WebRTC Remote peer opened DataChannel. Linking to TCP tunnel manager...");
         rtc::Thread* current_thread = rtc::Thread::Current();
-        tunnel_manager.HandleDataChannel(data_channel, current_thread);
+        tunnel_manager.HandleDataChannel(data_channel, current_thread);*/
     }
 
     void OnSignalingChange(webrtc::PeerConnectionInterface::SignalingState new_state) override {}

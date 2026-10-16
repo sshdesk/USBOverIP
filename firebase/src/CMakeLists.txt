@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(usbip_server VERSION 1.0 LANGUAGES CXX)
+project(usbipd VERSION 1.0 LANGUAGES CXX)
 
 # Coordinated standard (Aligned to 17 to prevent Conan package warnings)
 set(CMAKE_CXX_STANDARD 17)
@@ -41,37 +41,36 @@ if(WIN32)
 endif()
 # -------------------------------------------------------------------------
 
-add_executable(webrtc_signaling_app 
+add_executable(usbipd 
     main.cpp 
     signaling.cpp
     webrtc_stats.cpp
     tcptunnel.cpp
 
     # USBIPD Source Files
-    #usbipd/src/main.cpp 
     usbipd/src/usb_device_hid.cpp  
     usbipd/src/usb_device_passthrough.cpp  
     usbipd/src/usbip_server.cpp  
 )
 
 # Add include directories for USBIPD headers
-target_include_directories(webrtc_signaling_app PRIVATE
+target_include_directories(usbipd PRIVATE
     usbipd/include
 )
 
 if(WIN32)
-    target_compile_definitions(webrtc_signaling_app PRIVATE WEBRTC_WIN NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_definitions(usbipd PRIVATE WEBRTC_WIN NOMINMAX WIN32_LEAN_AND_MEAN)
     
     # Suppress the noisy LNK4099 warnings regarding missing internal libcurl PDB files
-    target_link_options(webrtc_signaling_app PRIVATE "/IGNORE:4099")
+    target_link_options(usbipd PRIVATE "/IGNORE:4099")
 else()
-    target_compile_definitions(webrtc_signaling_app PRIVATE WEBRTC_POSIX)
+    target_compile_definitions(usbipd PRIVATE WEBRTC_POSIX)
 endif()
 
 find_package(Threads REQUIRED)
 
 if(WIN32)
-    target_link_libraries(webrtc_signaling_app
+    target_link_libraries(usbipd
         PRIVATE
         google-webrtc::google-webrtc
         spdlog::spdlog
@@ -91,7 +90,7 @@ else()
     pkg_check_modules(SECRET REQUIRED IMPORTED_TARGET libsecret-1)
     pkg_check_modules(GLIB REQUIRED IMPORTED_TARGET glib-2.0)
 
-    target_link_libraries(webrtc_signaling_app 
+    target_link_libraries(usbipd 
         PRIVATE 
         google-webrtc::google-webrtc
         spdlog::spdlog
@@ -113,21 +112,26 @@ endif()
 set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/install" CACHE PATH "Local install prefix" FORCE)
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/google-services.json")
-    # Automatically resolve target runtime subfolder layout based on setup configurations
     if(CMAKE_BUILD_TYPE STREQUAL "Release")
         set(FB_OUTPUT_CONFIG "Release")
     else()
         set(FB_OUTPUT_CONFIG "Debug")
     endif()
     
-    # Copy to the active build compilation configuration directory path
+    # Copy to config-specific build directory
     configure_file(
         "${CMAKE_CURRENT_SOURCE_DIR}/google-services.json"
         "${CMAKE_BINARY_DIR}/${FB_OUTPUT_CONFIG}/google-services.json"
         COPYONLY
     )
     
-    # Add an installation rule to copy the file to the deployment Install directory
+    # Copy to root build directory
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/google-services.json"
+        "${CMAKE_BINARY_DIR}/google-services.json"
+        COPYONLY
+    )
+    
     install(
         FILES "${CMAKE_CURRENT_SOURCE_DIR}/google-services.json"
         DESTINATION bin
@@ -136,7 +140,39 @@ else()
     message(WARNING "google-services.json not found in source directory: ${CMAKE_CURRENT_SOURCE_DIR}")
 endif()
 
-install(TARGETS webrtc_signaling_app
+# Copy and Install Python Scripts
+set(PYTHON_SCRIPTS
+    port_forwarding_counter.py
+    port_forwarding_test_16KB.py
+    usb-ip.py
+)
+
+foreach(SCRIPT ${PYTHON_SCRIPTS})
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${SCRIPT}")
+        if(NOT DEFINED FB_OUTPUT_CONFIG)
+            if(CMAKE_BUILD_TYPE STREQUAL "Release")
+                set(FB_OUTPUT_CONFIG "Release")
+            else()
+                set(FB_OUTPUT_CONFIG "Debug")
+            endif()
+        endif()
+        
+        configure_file(
+            "${CMAKE_CURRENT_SOURCE_DIR}/${SCRIPT}"
+            "${CMAKE_BINARY_DIR}/${FB_OUTPUT_CONFIG}/${SCRIPT}"
+            COPYONLY
+        )
+        
+        install(
+            FILES "${CMAKE_CURRENT_SOURCE_DIR}/${SCRIPT}"
+            DESTINATION bin
+        )
+    else()
+        message(WARNING "${SCRIPT} not found in source directory: ${CMAKE_CURRENT_SOURCE_DIR}")
+    endif()
+endforeach()
+
+install(TARGETS usbipd
     RUNTIME DESTINATION bin
     BUNDLE DESTINATION bin
 )

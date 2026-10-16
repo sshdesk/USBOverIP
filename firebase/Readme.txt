@@ -7,13 +7,9 @@ set GITHUB_TOKEN=ghp_*******************
 git submodule update --init
 
 cd src
-python ../conan-deps/src/conan-cache-generator.py --type debug --download --unpack
+python ../conan-deps/src/conan-cache-generator.py --type windows_debug --download --unpack
 
-python ../conan-deps/src/conan-cache-generator.py --build-project --type debug
-
-
-
-
+python ../conan-deps/src/conan-cache-generator.py --build-project --type windows_debug
 
 
 

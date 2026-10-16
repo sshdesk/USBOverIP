@@ -1,4 +1,3 @@
-#define _CRT_SECURE_NO_WARNINGS
 #include "usb_device.h"
 #include <stdio.h>
 #include <stdlib.h>
