@@ -20,6 +20,8 @@
 
 #include "tcptunnel.h"
 
+//#define COUNTER 1
+
 rtc::scoped_refptr<webrtc::PeerConnectionInterface> peer_connection = nullptr;
 rtc::scoped_refptr<webrtc::DataChannelInterface> native_data_channel = nullptr;
 webrtc::DataChannelObserver* global_dc_observer = nullptr;
@@ -68,7 +70,7 @@ public:
         if (native_data_channel) {
             SPDLOG_INFO("DataChannel state changed: {}", webrtc::DataChannelInterface::DataStateString(native_data_channel->state()));
             if (native_data_channel->state() == webrtc::DataChannelInterface::kOpen) {
-                SPDLOG_INFO("DataChannel Open! USB/IP TCP tunnel active.");
+                SPDLOG_INFO("DataChannel Open! USB/IP starting usbip_server_on_channel_open .");
                 if (g_server) {
                     usbip_server_on_channel_open(g_server);
                 }
@@ -81,16 +83,6 @@ public:
         }
     }
 
-    void OnMessage(const webrtc::DataBuffer& buffer) override {
-        const uint8_t* data_ptr = buffer.data.data();
-        size_t data_size = buffer.data.size();
-
-        SPDLOG_INFO("PEER BINARY MESSAGE [{} bytes] routed through tunnel", data_size);
-        
-        if (g_server && buffer.binary) {
-            usbip_server_on_data_received(g_server, data_ptr, data_size);
-        }
-    }
 
 
     #if COUNTER
@@ -128,6 +120,19 @@ public:
             SPDLOG_INFO("[SERVER SENT] Echo Counter #{}", current_server_count);
         }
     }
+#else
+    void OnMessage(const webrtc::DataBuffer &buffer) override {
+      const uint8_t *data_ptr = buffer.data.data();
+      size_t data_size = buffer.data.size();
+
+      SPDLOG_INFO("PEER BINARY MESSAGE [{} bytes] routed through data channel",
+                  data_size);
+
+      if (g_server && buffer.binary) {
+        usbip_server_on_data_received(g_server, data_ptr, data_size);
+      }
+    }
+
 #endif
 
 
@@ -311,8 +316,10 @@ int main() {
                 SPDLOG_ERROR("Failed to start tunnel manager because TCP bind failed on Caller.");
             } else {
                 SPDLOG_INFO("Caller DataChannel created. Linking to TCP tunnel manager...");
-                rtc::Thread* current_thread = rtc::Thread::Current();
-                tunnel_manager.HandleDataChannel(native_data_channel, current_thread);
+                // rtc::Thread* current_thread = rtc::Thread::Current();
+                // tunnel_manager.HandleDataChannel(native_data_channel, current_thread);
+                tunnel_manager.HandleDataChannel(native_data_channel, signaling_thread.get());
+                
             }
         }
 

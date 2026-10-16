@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <windows.h>
+#include <spdlog/spdlog.h>
 
 /* Linux errno-style USB/IP status used when a request exceeds the bounded
  * transfer buffer supported by this server. */
@@ -112,7 +113,7 @@ static usb_device_t *find_device_by_busid(usbip_server_t *server, const char *bu
 }
 
 static int handle_op_devlist(usbip_server_t *server) {
-    printf("[USB/IP WebRTC] Handling OP_REQ_DEVLIST (Exported devices count: %d)\n", server->num_devices);
+    SPDLOG_INFO("[USB/IP WebRTC] Handling OP_REQ_DEVLIST (Exported devices count: {})", server->num_devices);
 
     usbip_op_rep_devlist_hdr_t rep;
     rep.version = htons(USBIP_VERSION);
@@ -145,14 +146,14 @@ static int handle_op_devlist(usbip_server_t *server) {
 }
 
 static int handle_urb_transfer_loop(usbip_server_t *server, usb_device_t *dev) {
-    printf("[USB/IP WebRTC] Attached to device %s. Entering URB transfer loop.\n", dev->busid);
+    SPDLOG_INFO("[USB/IP WebRTC] Attached to device {}. Entering URB transfer loop.", dev->busid);
     dev->attached = true;
 
     uint8_t *payload_in  = (uint8_t *)malloc(USBIP_MAX_TRANSFER_SIZE);
     uint8_t *payload_out = (uint8_t *)malloc(USBIP_MAX_TRANSFER_SIZE);
 
     if (!payload_in || !payload_out) {
-        printf("[USB/IP ERROR] Failed to allocate URB payload buffers.\n");
+        SPDLOG_ERROR("[USB/IP ERROR] Failed to allocate URB payload buffers.");
         free(payload_in);
         free(payload_out);
         return -1;
@@ -262,7 +263,7 @@ static int handle_urb_transfer_loop(usbip_server_t *server, usb_device_t *dev) {
     free(payload_in);
     free(payload_out);
     dev->attached = false;
-    printf("[USB/IP WebRTC] Device %s detached.\n", dev->busid);
+    SPDLOG_INFO("[USB/IP WebRTC] Device {} detached.", dev->busid);
     return 0;
 }
 
@@ -273,7 +274,7 @@ static int handle_op_import(usbip_server_t *server, const usbip_op_common_t *hdr
         return -1;
     }
 
-    printf("[USB/IP WebRTC] Received OP_REQ_IMPORT for busid: '%s'\n", busid);
+    SPDLOG_INFO("[USB/IP WebRTC] Received OP_REQ_IMPORT for busid: '{}'", busid);
     usb_device_t *dev = find_device_by_busid(server, busid);
 
     usbip_op_rep_import_t rep;
@@ -391,7 +392,7 @@ void usbip_server_on_data_received(usbip_server_t *server, const uint8_t *data, 
 
 void usbip_server_on_channel_open(usbip_server_t *server) {
     if (!server) return;
-    printf("[USB/IP WebRTC] Data channel opened.\n");
+    SPDLOG_INFO("[USB/IP WebRTC] Data channel opened.");
     EnterCriticalSection(&server->lock);
     server->client_connected = true;
     LeaveCriticalSection(&server->lock);
@@ -403,7 +404,7 @@ void usbip_server_on_channel_open(usbip_server_t *server) {
 
 void usbip_server_on_channel_closed(usbip_server_t *server) {
     if (!server) return;
-    printf("[USB/IP WebRTC] Data channel closed.\n");
+    SPDLOG_INFO("[USB/IP WebRTC] Data channel closed.");
     EnterCriticalSection(&server->lock);
     server->client_connected = false;
     LeaveCriticalSection(&server->lock);
