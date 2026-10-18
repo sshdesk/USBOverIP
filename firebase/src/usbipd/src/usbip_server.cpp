@@ -263,6 +263,13 @@ static int handle_urb_transfer_loop(usbip_server_t *server, usb_device_t *dev) {
     free(payload_in);
     free(payload_out);
     dev->attached = false;
+
+    EnterCriticalSection(&server->lock);
+    if (server->rx_buffer) {
+        server->rx_buffer->size = 0;
+    }
+    LeaveCriticalSection(&server->lock);
+
     SPDLOG_INFO("[USB/IP WebRTC] Device {} detached.", dev->busid);
     return 0;
 }
@@ -331,7 +338,6 @@ static DWORD WINAPI web_rtc_worker_thread(LPVOID lpParam) {
         }
         else if (command == OP_REQ_IMPORT) {
             if (handle_op_import(server, &op_hdr) != 0) break;
-            break;
         }
         else {
             break;
@@ -399,6 +405,12 @@ void usbip_server_on_channel_open(usbip_server_t *server) {
 
     server->running = true;
     server->worker_running = true;
+
+    if (server->worker_thread) {
+        CloseHandle(server->worker_thread);
+        server->worker_thread = NULL;
+    }
+
     server->worker_thread = CreateThread(NULL, 0, web_rtc_worker_thread, server, 0, NULL);
 }
 
@@ -407,6 +419,9 @@ void usbip_server_on_channel_closed(usbip_server_t *server) {
     SPDLOG_INFO("[USB/IP WebRTC] Data channel closed.");
     EnterCriticalSection(&server->lock);
     server->client_connected = false;
+    if (server->rx_buffer) {
+        server->rx_buffer->size = 0;
+    }
     LeaveCriticalSection(&server->lock);
     server->worker_running = false;
 }
