@@ -41,6 +41,34 @@ if(WIN32)
 endif()
 # -------------------------------------------------------------------------
 
+
+cmake_minimum_required(VERSION 3.15)
+project(gui_usbip CXX)
+
+
+find_package(Opus REQUIRED CONFIG)
+find_package(spdlog REQUIRED CONFIG)
+find_package(ZLIB REQUIRED CONFIG)
+find_package(SDL2 REQUIRED CONFIG)
+find_package(SDL2_ttf REQUIRED CONFIG)
+
+
+add_executable(gui_usbip WIN32 gui/gui_usbip.cpp)
+
+
+
+target_link_libraries(gui_usbip PRIVATE 
+    google-webrtc::google-webrtc 
+    openssl::openssl 
+    Opus::opus 
+    spdlog::spdlog 
+    ZLIB::ZLIB 
+    SDL2::SDL2
+    SDL2::SDL2main
+    sdl_ttf::sdl_ttf
+)
+
+
 add_executable(usbipd 
     main.cpp 
     signaling.cpp
