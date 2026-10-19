@@ -1,9 +1,11 @@
 #include "usbip_server.h"
 #include "usbip_log.h"
+#include "usb_device_passthrough.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <windows.h>
+#include <time.h>
 #include <spdlog/spdlog.h>
 
 /* Linux errno-style USB/IP status used when a request exceeds the bounded
@@ -11,7 +13,11 @@
 #define USBIP_STATUS_EOVERFLOW (-75)
 #define USBIP_MAX_TRANSFER_SIZE 262144u
 
-// Forward declaration for WebRTC data channel send API if available externally
+// Custom Command Codes for WebRTC Stream Multiplexing
+#define USBIP_CMD_CUSTOM_DETACH 0x5555FFFFu
+#define USBIP_CMD_CUSTOM_LIST   0x5555FEEFu
+#define USBIP_CMD_CUSTOM_BIND   0x5555FDDFu
+
 extern "C" void rtc_data_channel_send(rtc_data_channel_t *channel, const uint8_t *data, size_t size);
 
 struct ring_buffer {
@@ -103,6 +109,37 @@ static int recv_exact_rtc(usbip_server_t *server, void *buf, size_t len) {
     return -1;
 }
 
+static uint64_t monotonic_ms(void) {
+    return (uint64_t)GetTickCount64();
+}
+
+static void expire_reservation(usb_device_t *dev) {
+    if (dev && dev->reserved && dev->reserved_at_ms &&
+        monotonic_ms() - dev->reserved_at_ms > 30000u) {
+        SPDLOG_INFO("[USB/IP WebRTC] BIND reservation for {} expired.", dev->busid);
+        dev->reserved = false;
+        dev->reserved_at_ms = 0;
+    }
+}
+
+static int send_custom_status_rtc(usbip_server_t *server, uint32_t command, uint32_t status) {
+    uint32_t reply[2];
+    reply[0] = htonl(command);
+    reply[1] = htonl(status);
+    return send_exact_rtc(server, reply, sizeof(reply));
+}
+
+static void remove_device_from_registry(usbip_server_t *server, usb_device_t *dev) {
+    for (int i = 0; i < server->num_devices; ++i) {
+        if (server->devices[i] == dev) {
+            for (int j = i; j + 1 < server->num_devices; ++j)
+                server->devices[j] = server->devices[j + 1];
+            server->devices[--server->num_devices] = NULL;
+            return;
+        }
+    }
+}
+
 static usb_device_t *find_device_by_busid(usbip_server_t *server, const char *busid) {
     for (int i = 0; i < server->num_devices; ++i) {
         if (strcmp(server->devices[i]->busid, busid) == 0) {
@@ -113,24 +150,89 @@ static usb_device_t *find_device_by_busid(usbip_server_t *server, const char *bu
 }
 
 static int handle_op_devlist(usbip_server_t *server) {
-    SPDLOG_INFO("[USB/IP WebRTC] Handling OP_REQ_DEVLIST (Exported devices count: {})", server->num_devices);
+    usb_physical_device_info_t physical[USB_PHYSICAL_DEVICE_MAX];
+    int physical_count = 0;
+    if (server->dynamic_devices) {
+        physical_count = usb_device_enumerate_physical_devices(physical, USB_PHYSICAL_DEVICE_MAX);
+        EnterCriticalSection(&server->lock);
+        int write_index = 0;
+        for (int i = 0; i < physical_count; ++i) {
+            bool busy = false;
+            for (int j = 0; j < server->num_devices; ++j) {
+                if (server->devices[j]) expire_reservation(server->devices[j]);
+                if (server->devices[j] &&
+                    (server->devices[j]->attached || server->devices[j]->reserved) &&
+                    strcmp(server->devices[j]->busid, physical[i].busid) == 0) {
+                    busy = true;
+                    break;
+                }
+            }
+            if (!busy) physical[write_index++] = physical[i];
+        }
+        physical_count = write_index;
+
+        for (int j = 0; j < server->num_devices && physical_count < USB_PHYSICAL_DEVICE_MAX; ++j) {
+            usb_device_t *cached = server->devices[j];
+            if (!cached) continue;
+            expire_reservation(cached);
+            if (cached->attached || cached->reserved) continue;
+            bool present = false;
+            for (int i = 0; i < physical_count; ++i) {
+                if (strcmp(physical[i].busid, cached->busid) == 0) { present = true; break; }
+            }
+            if (!present) {
+                strncpy(physical[physical_count].busid, cached->busid,
+                        sizeof(physical[physical_count].busid) - 1);
+                physical[physical_count].vid = cached->desc.idVendor;
+                physical[physical_count].pid = cached->desc.idProduct;
+                ++physical_count;
+            }
+        }
+        LeaveCriticalSection(&server->lock);
+    }
+
+    int exported_count = server->dynamic_devices ? physical_count : server->num_devices;
+    SPDLOG_INFO("[USB/IP WebRTC] Handling OP_REQ_DEVLIST (devices count: {}, dynamic={})",
+                exported_count, server->dynamic_devices ? "yes" : "no");
 
     usbip_op_rep_devlist_hdr_t rep;
+    memset(&rep, 0, sizeof(rep));
     rep.version = htons(USBIP_VERSION);
     rep.command = htons(OP_REP_DEVLIST);
     rep.status  = htonl(ST_OK);
-    rep.ndev    = htonl((uint32_t)server->num_devices);
+    rep.ndev    = htonl((uint32_t)exported_count);
 
     if (send_exact_rtc(server, &rep, sizeof(rep)) != 0) {
         return -1;
     }
 
+    if (server->dynamic_devices) {
+        for (int i = 0; i < physical_count; ++i) {
+            usbip_op_device_info_t info;
+            memset(&info, 0, sizeof(info));
+            snprintf(info.path, sizeof(info.path), "/sys/bus/usb/devices/%s", physical[i].busid);
+            strncpy(info.busid, physical[i].busid, sizeof(info.busid) - 1);
+            unsigned int bus = 1, port = 1;
+            if (sscanf(physical[i].busid, "%u-%u", &bus, &port) != 2) { bus = 1; port = 1; }
+            info.busnum = htonl(bus);
+            info.devnum = htonl(port);
+            info.speed = htonl(USB_SPEED_HIGH);
+            info.idVendor = htons(physical[i].vid);
+            info.idProduct = htons(physical[i].pid);
+            info.bNumInterfaces = 0;
+            if (send_exact_rtc(server, &info, sizeof(info)) != 0) return -1;
+        }
+        return 0;
+    }
+
+    EnterCriticalSection(&server->lock);
     for (int i = 0; i < server->num_devices; ++i) {
         usb_device_t *dev = server->devices[i];
         usbip_op_device_info_t dev_info;
         usb_device_fill_op_info(dev, &dev_info);
 
         if (send_exact_rtc(server, &dev_info, sizeof(dev_info)) != 0) {
+            LeaveCriticalSection(&server->lock);
             return -1;
         }
 
@@ -138,17 +240,18 @@ static int handle_op_devlist(usbip_server_t *server) {
             usbip_op_interface_info_t intf_info;
             usb_device_fill_interface_info(dev, (uint8_t)intf, &intf_info);
             if (send_exact_rtc(server, &intf_info, sizeof(intf_info)) != 0) {
+                LeaveCriticalSection(&server->lock);
                 return -1;
             }
         }
     }
+    LeaveCriticalSection(&server->lock);
     return 0;
 }
 
 static int handle_urb_transfer_loop(usbip_server_t *server, usb_device_t *dev) {
     SPDLOG_INFO("[USB/IP WebRTC] Attached to device {}. Entering URB transfer loop.", dev->busid);
-    dev->attached = true;
-
+    
     uint8_t *payload_in  = (uint8_t *)malloc(USBIP_MAX_TRANSFER_SIZE);
     uint8_t *payload_out = (uint8_t *)malloc(USBIP_MAX_TRANSFER_SIZE);
 
@@ -156,6 +259,9 @@ static int handle_urb_transfer_loop(usbip_server_t *server, usb_device_t *dev) {
         SPDLOG_ERROR("[USB/IP ERROR] Failed to allocate URB payload buffers.");
         free(payload_in);
         free(payload_out);
+        EnterCriticalSection(&server->lock);
+        dev->attached = false;
+        LeaveCriticalSection(&server->lock);
         return -1;
     }
 
@@ -213,7 +319,6 @@ static int handle_urb_transfer_loop(usbip_server_t *server, usb_device_t *dev) {
                                                    payload_in, 262144, &actual_length);
             }
 
-            /* Send USBIP_RET_SUBMIT header (48 bytes) - exact match */
             usbip_header_ret_submit_t ret;
             memset(&ret, 0, sizeof(ret));
             ret.command       = htonl(USBIP_RET_SUBMIT);
@@ -228,7 +333,6 @@ static int handle_urb_transfer_loop(usbip_server_t *server, usb_device_t *dev) {
                 break;
             }
 
-            /* Send IN payload back if requested - exact match */
             if (status == 0 && direction == USBIP_DIR_IN && actual_length > 0) {
                 if (send_exact_rtc(server, payload_in, actual_length) != 0) {
                     break;
@@ -262,49 +366,177 @@ static int handle_urb_transfer_loop(usbip_server_t *server, usb_device_t *dev) {
 
     free(payload_in);
     free(payload_out);
-    dev->attached = false;
 
+    bool release_capture = false;
     EnterCriticalSection(&server->lock);
-    if (server->rx_buffer) {
-        server->rx_buffer->size = 0;
+    dev->attached = false;
+    //dev->active_socket = 0;
+    release_capture = dev->detach_requested;
+    if (release_capture) {
+        SPDLOG_INFO("[USB/IP WebRTC] Explicit DETACH: releasing captured device {}.", dev->busid);
+        remove_device_from_registry(server, dev);
     }
     LeaveCriticalSection(&server->lock);
 
     SPDLOG_INFO("[USB/IP WebRTC] Device {} detached.", dev->busid);
+    if (release_capture) usb_device_destroy(dev);
     return 0;
+}
+
+static int handle_custom_bind(usbip_server_t *server) {
+    char busid[SYSFS_BUS_ID_SIZE] = {0};
+    if (recv_exact_rtc(server, busid, sizeof(busid)) != 0) return -1;
+    busid[sizeof(busid) - 1] = '\0';
+    SPDLOG_INFO("[USB/IP WebRTC] Received CUSTOM_BIND for BUSID '{}'.", busid);
+
+    uint32_t status = ST_OK;
+    EnterCriticalSection(&server->lock);
+    usb_device_t *dev = find_device_by_busid(server, busid);
+    if (dev) expire_reservation(dev);
+
+    if (dev && (dev->attached || dev->reserved)) {
+        status = ST_DEV_BUSY;
+    } else if (!dev && server->dynamic_devices) {
+        usb_physical_device_info_t physical[USB_PHYSICAL_DEVICE_MAX];
+        int count = usb_device_enumerate_physical_devices(physical, USB_PHYSICAL_DEVICE_MAX);
+        uint16_t vid = 0, pid = 0;
+        bool found = false;
+        for (int i = 0; i < count; ++i) {
+            if (strcmp(physical[i].busid, busid) == 0) {
+                vid = physical[i].vid;
+                pid = physical[i].pid;
+                found = true;
+                break;
+            }
+        }
+        if (found && server->num_devices < MAX_DEVICES) {
+            SPDLOG_INFO("[USB/IP WebRTC] CUSTOM_BIND capturing {} ({:04X}:{:04X}).", busid, vid, pid);
+            dev = usb_device_create_passthrough(busid, vid, pid, INVALID_HANDLE_VALUE);
+            if (dev) server->devices[server->num_devices++] = dev;
+            else status = ST_DEV_ERR;
+        } else {
+            status = found ? ST_ERROR : ST_NODEV;
+        }
+    } else if (!dev) {
+        status = ST_NODEV;
+    }
+
+    if (status == ST_OK && dev) {
+        dev->reserved = true;
+        dev->reserved_at_ms = monotonic_ms();
+    }
+    LeaveCriticalSection(&server->lock);
+
+    if (status == ST_OK)
+        SPDLOG_INFO("[USB/IP WebRTC] Device {} reserved for IMPORT.", busid);
+    else
+        SPDLOG_WARN("[USB/IP WebRTC] CUSTOM_BIND rejected for {} (status={}).", busid, status);
+
+    return send_custom_status_rtc(server, USBIP_CMD_CUSTOM_BIND, status);
+}
+
+static int handle_custom_detach(usbip_server_t *server) {
+    char busid[SYSFS_BUS_ID_SIZE] = {0};
+    if (recv_exact_rtc(server, busid, sizeof(busid)) != 0) return -1;
+    busid[sizeof(busid) - 1] = '\0';
+    SPDLOG_INFO("[USB/IP WebRTC] Received CUSTOM_DETACH for BUSID '{}'.", busid);
+
+    usb_device_t *release_now = NULL;
+    uint32_t status = ST_OK;
+
+    EnterCriticalSection(&server->lock);
+    usb_device_t *dev = find_device_by_busid(server, busid);
+    if (dev) expire_reservation(dev);
+    if (!dev) {
+        status = ST_NODEV;
+    } else if (dev->attached) {
+        dev->detach_requested = true;
+    } else {
+        remove_device_from_registry(server, dev);
+        release_now = dev;
+    }
+    LeaveCriticalSection(&server->lock);
+
+    if (release_now) usb_device_destroy(release_now);
+
+    if (status == ST_OK)
+        SPDLOG_INFO("[USB/IP WebRTC] CUSTOM_DETACH accepted for {}.", busid);
+    else
+        SPDLOG_WARN("[USB/IP WebRTC] CUSTOM_DETACH could not find {}.", busid);
+
+    return send_custom_status_rtc(server, USBIP_CMD_CUSTOM_DETACH, status);
 }
 
 static int handle_op_import(usbip_server_t *server, const usbip_op_common_t *hdr) {
     (void)hdr;
     char busid[SYSFS_BUS_ID_SIZE] = {0};
-    if (recv_exact_rtc(server, busid, sizeof(busid)) != 0) {
-        return -1;
-    }
-
+    if (recv_exact_rtc(server, busid, sizeof(busid)) != 0) return -1;
+    busid[sizeof(busid) - 1] = '\0';
     SPDLOG_INFO("[USB/IP WebRTC] Received OP_REQ_IMPORT for busid: '{}'", busid);
-    usb_device_t *dev = find_device_by_busid(server, busid);
 
     usbip_op_rep_import_t rep;
     memset(&rep, 0, sizeof(rep));
     rep.version = htons(USBIP_VERSION);
     rep.command = htons(OP_REP_IMPORT);
 
+    EnterCriticalSection(&server->lock);
+    usb_device_t *dev = find_device_by_busid(server, busid);
+    if (dev) expire_reservation(dev);
+    if (!dev && server->dynamic_devices) {
+        usb_physical_device_info_t physical[USB_PHYSICAL_DEVICE_MAX];
+        int count = usb_device_enumerate_physical_devices(physical, USB_PHYSICAL_DEVICE_MAX);
+        uint16_t vid = 0, pid = 0;
+        bool found = false;
+        for (int i = 0; i < count; ++i) {
+            if (strcmp(physical[i].busid, busid) == 0) {
+                vid = physical[i].vid;
+                pid = physical[i].pid;
+                found = true;
+                break;
+            }
+        }
+        if (found) {
+            SPDLOG_INFO("[USB/IP WebRTC] Client selected {} ({:04X}:{:04X}); capturing now.", busid, vid, pid);
+            dev = usb_device_create_passthrough(busid, vid, pid, INVALID_HANDLE_VALUE);
+            if (dev) {
+                if (server->num_devices < MAX_DEVICES) {
+                    server->devices[server->num_devices++] = dev;
+                } else {
+                    SPDLOG_ERROR("[USB/IP WebRTC] Device registry is full; releasing newly captured device.");
+                    usb_device_destroy(dev);
+                    dev = NULL;
+                }
+            }
+        }
+    }
+
     if (!dev) {
+        LeaveCriticalSection(&server->lock);
+        SPDLOG_WARN("[USB/IP WebRTC] Device '{}' not found or no longer available.", busid);
         rep.status = htonl(ST_NODEV);
-        send_exact_rtc(server, &rep, sizeof(rep));
+        (void)send_exact_rtc(server, &rep, sizeof(rep));
         return -1;
     }
-
     if (dev->attached) {
+        LeaveCriticalSection(&server->lock);
+        SPDLOG_WARN("[USB/IP WebRTC] Device '{}' is already busy/attached.", busid);
         rep.status = htonl(ST_DEV_BUSY);
-        send_exact_rtc(server, &rep, sizeof(rep));
+        (void)send_exact_rtc(server, &rep, sizeof(rep));
         return -1;
     }
 
-    rep.status = htonl(ST_OK);
+    dev->reserved = false;
+    dev->reserved_at_ms = 0;
+    dev->detach_requested = false;
+    dev->attached = true;
     usb_device_fill_op_info(dev, &rep.udev);
+    rep.status = htonl(ST_OK);
+    LeaveCriticalSection(&server->lock);
 
     if (send_exact_rtc(server, &rep, sizeof(rep)) != 0) {
+        EnterCriticalSection(&server->lock);
+        dev->attached = false;
+        LeaveCriticalSection(&server->lock);
         return -1;
     }
 
@@ -320,8 +552,30 @@ static DWORD WINAPI web_rtc_worker_thread(LPVOID lpParam) {
             continue;
         }
 
+        uint32_t first_word = 0;
+        if (recv_exact_rtc(server, &first_word, sizeof(first_word)) != 0) {
+            server->client_connected = false;
+            break;
+        }
+        uint32_t custom_command = ntohl(first_word);
+
+        if (custom_command == USBIP_CMD_CUSTOM_LIST) {
+            if (handle_op_devlist(server) != 0) break;
+            continue;
+        }
+        if (custom_command == USBIP_CMD_CUSTOM_BIND) {
+            (void)handle_custom_bind(server);
+            continue;
+        }
+        if (custom_command == USBIP_CMD_CUSTOM_DETACH) {
+            (void)handle_custom_detach(server);
+            continue;
+        }
+
         usbip_op_common_t op_hdr;
-        if (recv_exact_rtc(server, &op_hdr, sizeof(op_hdr)) != 0) {
+        memcpy(&op_hdr, &first_word, sizeof(first_word));
+        if (recv_exact_rtc(server, ((char *)&op_hdr) + sizeof(first_word),
+                       sizeof(op_hdr) - sizeof(first_word)) != 0) {
             server->client_connected = false;
             break;
         }
@@ -376,6 +630,10 @@ int usbip_server_register_device(usbip_server_t *server, usb_device_t *dev) {
     return 0;
 }
 
+void usbip_server_enable_dynamic_devices(usbip_server_t *server, bool enabled) {
+    if (server) server->dynamic_devices = enabled;
+}
+
 void usbip_server_stop(usbip_server_t *server) {
     if (server) {
         server->running = false;
@@ -390,7 +648,8 @@ void usbip_server_stop(usbip_server_t *server) {
 }
 
 void usbip_server_on_data_received(usbip_server_t *server, const uint8_t *data, size_t size) {
-    if (!server) return;
+    if (!server || size == 0) return;
+
     EnterCriticalSection(&server->lock);
     ring_buffer_write(server->rx_buffer, data, size);
     LeaveCriticalSection(&server->lock);

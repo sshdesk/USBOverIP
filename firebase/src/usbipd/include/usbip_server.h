@@ -6,7 +6,7 @@
 #include <stdbool.h>
 #include <windows.h>
 
-#define MAX_DEVICES 8
+#define MAX_DEVICES 64
 
 typedef struct rtc_peer_connection rtc_peer_connection_t;
 typedef struct rtc_data_channel    rtc_data_channel_t;
@@ -15,6 +15,7 @@ typedef struct ring_buffer         ring_buffer_t;
 struct usbip_server_t {
     usb_device_t         *devices[MAX_DEVICES];
     int                   num_devices;
+    bool          dynamic_devices; /* enumerate on DEVLIST; capture on IMPORT */
     volatile bool         running;
 
     rtc_peer_connection_t *peer_connection;

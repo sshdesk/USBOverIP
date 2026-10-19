@@ -13,6 +13,11 @@
 
 #define USBIP_VERSION               0x0111
 #define USBIP_DEFAULT_PORT          3240
+
+/* Custom TCP control commands (32-bit network-order words). */
+#define USBIP_CMD_CUSTOM_DETACH      0x5555FFFFu
+#define USBIP_CMD_CUSTOM_LIST        0x5555FEEFu
+#define USBIP_CMD_CUSTOM_BIND        0x5555FDDFu
 #define SYSFS_BUS_ID_SIZE           32
 #define SYSFS_PATH_MAX              256
 
