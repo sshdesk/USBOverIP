@@ -16,6 +16,8 @@ namespace usbip
 class UsbIds;
 std::string get_product(const UsbIds &ids, uint16_t vendor, uint16_t product);
 std::string get_class(const UsbIds &ids, uint8_t class_, uint8_t subclass, uint8_t protocol);
+std::string get_device_type(const UsbIds &ids, uint16_t vendor, uint16_t product,
+                            uint8_t class_, uint8_t subclass, uint8_t protocol);
 
 const char *get_speed_str(USB_DEVICE_SPEED speed) noexcept;
 const char *to_string(receive_mode mode) noexcept;

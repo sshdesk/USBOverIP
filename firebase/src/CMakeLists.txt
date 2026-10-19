@@ -42,8 +42,6 @@ endif()
 # -------------------------------------------------------------------------
 
 
-cmake_minimum_required(VERSION 3.15)
-project(gui_usbip CXX)
 
 
 find_package(Opus REQUIRED CONFIG)
@@ -81,6 +79,7 @@ add_executable(usbipd
     usbipd/src/usb_device_passthrough.cpp  
     usbipd/src/usbip_server.cpp  
 )
+
 
 # Add include directories for USBIPD headers
 target_include_directories(usbipd PRIVATE
@@ -137,6 +136,90 @@ else()
         dl rt m pthread
     )
 endif()
+
+
+add_subdirectory(usbip)
+
+add_executable(usbip-win2 
+    mainusbip.cpp
+    signaling.cpp
+    tcptunnel.cpp
+    webrtc_stats.cpp
+)
+
+
+
+
+if(WIN32)
+    target_compile_definitions(usbip-win2 PRIVATE WEBRTC_WIN NOMINMAX WIN32_LEAN_AND_MEAN)
+    
+    # Suppress the noisy LNK4099 warnings regarding missing internal libcurl PDB files
+    target_link_options(usbip-win2 PRIVATE "/IGNORE:4099")
+else()
+    target_compile_definitions(usbip-win2 PRIVATE WEBRTC_POSIX)
+endif()
+
+
+target_include_directories(usbip-win2 PRIVATE
+    usbip/include/usbip  usbip/userspace/usbip
+)
+
+
+find_package(Threads REQUIRED)
+
+if(WIN32)
+    target_link_libraries(usbip-win2
+        PRIVATE
+        google-webrtc::google-webrtc
+        spdlog::spdlog
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        Threads::Threads
+        usbip
+        firebase_firestore
+        firebase_database
+        firebase_auth
+        firebase_app
+        
+        ws2_32 winmm secur32 crypt32 iphlpapi shlwapi user32 gdi32
+    )
+else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(SECRET REQUIRED IMPORTED_TARGET libsecret-1)
+    pkg_check_modules(GLIB REQUIRED IMPORTED_TARGET glib-2.0)
+
+    target_link_libraries(usbip-win2 
+        PRIVATE 
+        google-webrtc::google-webrtc
+        spdlog::spdlog
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        Threads::Threads
+        PkgConfig::SECRET
+        PkgConfig::GLIB
+        
+        firebase_firestore
+        firebase_database
+        firebase_auth
+        firebase_app
+        
+        dl rt m pthread
+    )
+endif()
+
+
+
+
+# AUTOMATED FIX: Copy libusbip.dll to the executable folder post-build
+if(WIN32)
+    add_custom_command(TARGET usbip-win2 POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "$<TARGET_FILE:libusbip>"
+        "$<TARGET_FILE_DIR:usbip-win2>/"
+    )
+endif()
+
+
 
 set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/install" CACHE PATH "Local install prefix" FORCE)
 

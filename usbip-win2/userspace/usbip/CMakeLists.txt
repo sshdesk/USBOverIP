@@ -28,6 +28,7 @@ target_compile_features(usbip
 target_include_directories(usbip
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/.."
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../include"
 )
 
 target_compile_definitions(usbip

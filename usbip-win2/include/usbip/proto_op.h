@@ -14,6 +14,12 @@
 namespace usbip
 {
 
+// Custom control-plane commands used by the companion dynamic USB/IP server.
+// The command is sent as a 32-bit network-order word on a fresh TCP connection.
+inline constexpr UINT32 USBIP_CMD_CUSTOM_DETACH = 0x5555FFFFu;
+inline constexpr UINT32 USBIP_CMD_CUSTOM_LIST   = 0x5555FEEFu;
+inline constexpr UINT32 USBIP_CMD_CUSTOM_BIND   = 0x5555FDDFu;
+
 #pragma pack(push, 1)
 
 struct usbip_usb_interface 

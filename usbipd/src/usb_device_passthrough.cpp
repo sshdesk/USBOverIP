@@ -1421,6 +1421,70 @@ usb_device_t *usb_device_create_passthrough(const char *busid,
     return (usb_device_t *)pt;
 }
 
+int usb_device_enumerate_physical_devices(usb_physical_device_info_t *out, int capacity) {
+    if (!out || capacity <= 0) return 0;
+    int count = 0;
+#ifdef _WIN32
+    HDEVINFO set = SetupDiGetClassDevsW(&GUID_DEVINTERFACE_USB_DEVICE_LOCAL, NULL, NULL,
+                                        DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+    if (set == INVALID_HANDLE_VALUE) {
+        print_winerr("SetupDiGetClassDevs(enumerate)");
+        return 0;
+    }
+    for (DWORD i = 0; i < 4096 && count < capacity; ++i) {
+        SP_DEVICE_INTERFACE_DATA if_data;
+        memset(&if_data, 0, sizeof(if_data));
+        if_data.cbSize = sizeof(if_data);
+        if (!SetupDiEnumDeviceInterfaces(set, NULL, &GUID_DEVINTERFACE_USB_DEVICE_LOCAL, i, &if_data)) {
+            if (GetLastError() == ERROR_NO_MORE_ITEMS) break;
+            continue;
+        }
+        DWORD needed = 0;
+        SP_DEVINFO_DATA data;
+        memset(&data, 0, sizeof(data));
+        data.cbSize = sizeof(data);
+        SetupDiGetDeviceInterfaceDetailW(set, &if_data, NULL, 0, &needed, &data);
+        if (!needed) continue;
+        PSP_DEVICE_INTERFACE_DETAIL_DATA_W detail =
+            (PSP_DEVICE_INTERFACE_DETAIL_DATA_W)calloc(1, needed);
+        if (!detail) continue;
+        detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
+        if (!SetupDiGetDeviceInterfaceDetailW(set, &if_data, detail, needed, NULL, &data)) {
+            free(detail);
+            continue;
+        }
+        char hwid[1024] = {0};
+        char location[512] = {0};
+        get_dev_property_string(set, &data, SPDRP_HARDWAREID, hwid, sizeof(hwid));
+        get_dev_property_string(set, &data, SPDRP_LOCATION_INFORMATION, location, sizeof(location));
+        char *vp = strstr(hwid, "VID_");
+        char *pp = strstr(hwid, "PID_");
+        unsigned int vid = 0, pid = 0;
+        uint32_t bus = 0, port = 0;
+        bool valid = vp && pp && sscanf(vp + 4, "%4x", &vid) == 1 &&
+                     sscanf(pp + 4, "%4x", &pid) == 1 &&
+                     location_get_bus_port(location, &bus, &port) && bus > 0 && port > 0;
+        if (valid) {
+            char busid[SYSFS_BUS_ID_SIZE] = {0};
+            snprintf(busid, sizeof(busid), "%lu-%lu", (unsigned long)bus, (unsigned long)port);
+            bool duplicate = false;
+            for (int j = 0; j < count; ++j) {
+                if (strcmp(out[j].busid, busid) == 0) { duplicate = true; break; }
+            }
+            if (!duplicate) {
+                strncpy(out[count].busid, busid, sizeof(out[count].busid) - 1);
+                out[count].vid = (uint16_t)vid;
+                out[count].pid = (uint16_t)pid;
+                ++count;
+            }
+        }
+        free(detail);
+    }
+    SetupDiDestroyDeviceInfoList(set);
+#endif
+    return count;
+}
+
 void usb_device_list_physical_devices(void) {
     printf("======================================================================\n");
     printf("  Connected USB Devices (VID/PID)\n");

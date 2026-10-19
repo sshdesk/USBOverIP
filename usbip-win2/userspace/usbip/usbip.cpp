@@ -83,8 +83,11 @@ void add_cmd_attach(CLI::App &app)
         rem->add_option("-r,--remote", r->remote, "Hostname/IP of a USB/IP server with exported USB devices")
                 ->required();
 
-        rem->add_option("-b,--bus-id", r->busid, "Bus Id of the USB device on a server")
-                ->required();
+        auto busid_opt = rem->add_option("-b,--bus-id", r->busid, "Bus Id of the USB device on a server");
+        auto select_opt = rem->add_flag("--select", r->select_device,
+                "Query the server device list and interactively select a device to attach");
+        busid_opt->excludes(select_opt);
+        select_opt->excludes(busid_opt);
 
         rem->add_option("--serial", r->serial, "device serial number")->check(serial_validator);
         rem->add_flag("-t,--terse", r->terse, "Show port number as a result");

@@ -64,6 +64,13 @@ static int force_release_signal(const char *busid) {
     _snprintf_s(name, sizeof(name), _TRUNCATE,
                 "Local\\USBIP_C_FORCE_RELEASE_%s", busid);
     HANDLE ev = OpenEventA(EVENT_MODIFY_STATE, FALSE, name);
+    bool dynamic_endpoint = false;
+    if (!ev && GetLastError() == ERROR_FILE_NOT_FOUND) {
+        /* In dynamic mode, the selected BUSID is not known at server startup.
+         * The dynamic endpoint releases all cached devices by stopping the server. */
+        ev = OpenEventA(EVENT_MODIFY_STATE, FALSE, "Local\\USBIP_C_FORCE_RELEASE_dynamic");
+        dynamic_endpoint = (ev != NULL);
+    }
     if (!ev) {
         DWORD err = GetLastError();
         if (err == ERROR_FILE_NOT_FOUND) {
@@ -80,7 +87,10 @@ static int force_release_signal(const char *busid) {
                 GetLastError());
         return 1;
     }
-    printf("[USB/IP] Force-release signal sent for BUSID %s.\n", busid);
+    if (dynamic_endpoint)
+        printf("[USB/IP] Dynamic server-wide force-release signal sent (requested BUSID %s).\n", busid);
+    else
+        printf("[USB/IP] Force-release signal sent for BUSID %s.\n", busid);
     return 0;
 }
 #endif
@@ -104,8 +114,11 @@ static void print_usage(const char *prog) {
     printf("Usage:\n");
     printf("  %s --list\n", prog);
     printf("      List USB devices visible to Windows.\n\n");
+    printf("  %s [port]\n", prog);
+    printf("      Dynamic mode: clients request the USB/IP device list and select a BUSID to import.\n");
+    printf("      The selected device is captured only when the client sends OP_REQ_IMPORT.\n\n");
     printf("  %s [port] --passthrough <busid> <vid_hex> <pid_hex>\n", prog);
-    printf("      Capture the real USB device through VBoxUSBMon/VBoxUSB.\n");
+    printf("      Optional legacy mode: capture one fixed device at startup.\n");
     printf("      Example: %s 3240 --passthrough 3-2 0951 16A1\n\n", prog);
 #ifdef _WIN32
     printf("  %s --force-release <busid>\n", prog);
@@ -172,16 +185,14 @@ int main(int argc, char *argv[]) {
     }
 #endif
 
-    if (!have_passthrough) {
-        print_usage(argv[0]);
-        return 2;
-    }
-
     printf("==================================================\n");
-    printf(" USB/IP C Server - REAL Windows USB Passthrough\n");
+    printf(" USB/IP Server - REAL Windows USB Passthrough\n");
     printf(" VBoxUSB/VBoxUSBMon compatible architecture\n");
     printf("==================================================\n");
-    printf("BusID: %s  VID:PID=%04X:%04X  TCP=%u\n", busid, vid, pid, port);
+    if (have_passthrough)
+        printf("Mode: fixed device  BUSID: %s  VID:PID=%04X:%04X  TCP=%u\n", busid, vid, pid, port);
+    else
+        printf("Mode: client-selected devices  TCP=%u\n", port);
 
     g_server = usbip_server_create(port);
     if (!g_server) {
@@ -189,31 +200,45 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    usb_device_t *dev = usb_device_create_passthrough(busid, vid, pid, INVALID_HANDLE_VALUE);
-    if (!dev) {
-        fprintf(stderr, "Failed to capture USB device.\n");
-        fprintf(stderr, "Check that VBoxUSBMon/VBoxUSB from usbipd-win is installed,\n");
-        fprintf(stderr, "the process is Administrator, and the device is not busy.\n");
-        usbip_server_destroy(g_server);
-        g_server = NULL;
-        return 1;
-    }
-
-    if (usbip_server_register_device(g_server, dev) != 0) {
-        fprintf(stderr, "Failed to register USB device.\n");
-        usb_device_destroy(dev);
-        usbip_server_destroy(g_server);
-        g_server = NULL;
-        return 1;
+    if (have_passthrough) {
+        usb_device_t *dev = usb_device_create_passthrough(busid, vid, pid, INVALID_HANDLE_VALUE);
+        if (!dev) {
+            fprintf(stderr, "Failed to capture USB device.\n");
+            fprintf(stderr, "Check that VBoxUSBMon/VBoxUSB from usbipd-win is installed,\n");
+            fprintf(stderr, "the process is Administrator, and the device is not busy.\n");
+            usbip_server_destroy(g_server);
+            g_server = NULL;
+            return 1;
+        }
+        if (usbip_server_register_device(g_server, dev) != 0) {
+            fprintf(stderr, "Failed to register USB device.\n");
+            usb_device_destroy(dev);
+            usbip_server_destroy(g_server);
+            g_server = NULL;
+            return 1;
+        }
+#ifdef _WIN32
+        if (!force_release_create_endpoint(busid)) {
+            usbip_server_destroy(g_server);
+            g_server = NULL;
+            return 1;
+        }
+        printf("[USB/IP] Force-release endpoint ready: %s\n", g_force_release_event_name);
+#endif
+    } else {
+        usbip_server_enable_dynamic_devices(g_server, true);
+#ifdef _WIN32
+        if (!force_release_create_endpoint("dynamic")) {
+            usbip_server_destroy(g_server);
+            g_server = NULL;
+            return 1;
+        }
+        printf("[USB/IP] Dynamic force-release endpoint ready: %s\n", g_force_release_event_name);
+#endif
+        printf("[USB/IP] Dynamic device selection enabled; no device is captured until IMPORT.\n");
     }
 
 #ifdef _WIN32
-    if (!force_release_create_endpoint(busid)) {
-        usbip_server_destroy(g_server);
-        g_server = NULL;
-        return 1;
-    }
-    printf("[USB/IP] Force-release endpoint ready: %s\n", g_force_release_event_name);
     SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
 #else
     signal(SIGINT, sigint_handler);

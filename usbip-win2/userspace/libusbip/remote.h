@@ -12,7 +12,7 @@
 #include <string>
 #include <functional>
 
-#if __cplusplus >= 202002L
+#if (defined(_MSVC_LANG) && _MSVC_LANG >= 202002L) || __cplusplus >= 202002L
   #include <optional>
   #include <stop_token>
 #endif
@@ -69,7 +69,7 @@ USBIP_API Socket connect(
         _In_opt_ HANDLE cancel_event = HANDLE{});
 
 
-#if __cplusplus >= 202002L
+#if (defined(_MSVC_LANG) && _MSVC_LANG >= 202002L) || __cplusplus >= 202002L
 /**
  * The call is blocking.
  * @param hostname name or IP address of a host to connect to

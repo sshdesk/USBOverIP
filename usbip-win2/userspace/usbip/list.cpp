@@ -30,16 +30,21 @@ void on_device(int, _In_ const usb_device &d)
         auto &ids = get_ids();
         auto prod = get_product(ids, d.idVendor, d.idProduct);
         auto csp = get_class(ids, d.bDeviceClass, d.bDeviceSubClass, d.bDeviceProtocol);
+        auto type = get_device_type(ids, d.idVendor, d.idProduct,
+                                    d.bDeviceClass, d.bDeviceSubClass, d.bDeviceProtocol);
 
         auto lines = std::format(
                         "{:^11}: {}\n"
+                        "{:11}: Type: {}\n"
                         "{:11}: {}\n"
                         "{:11}: {}\n",
                         d.busid, prod,
+                        "", type,
                         "", d.path,
                         "", csp);
 
         if (!d.bNumInterfaces) {
+                lines += "           : Interfaces: not provided by server\n";
                 lines += '\n';
         }
 

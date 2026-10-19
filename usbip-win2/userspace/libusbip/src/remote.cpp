@@ -513,7 +513,10 @@ bool usbip::enum_exportable_devices(
 {
 	assert(s != INVALID_SOCKET);
 	
-	if (!send_op_common(s, OP_REQ_DEVLIST)) {
+	// Custom server control plane: LIST is a single 32-bit command word.
+	// The reply remains the standard USB/IP OP_REP_DEVLIST body.
+	const UINT32 custom_list = htonl(USBIP_CMD_CUSTOM_LIST);
+	if (!send(s, &custom_list, sizeof(custom_list))) {
 		return false;
 	}
 
