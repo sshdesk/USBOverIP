@@ -298,7 +298,7 @@ void add_cmd_list(CLI::App &app)
                 ->callback(pack(cmd_list, r))
                 ->require_option(1);
 
-        cmd->add_option_group("Remote", "List exportable USB devices")
+        cmd->add_option_group("Remote", "List exportable devices on a remote")
                 ->add_option("-r,--remote", r->remote, "List exportable devices on a remote")
                 ->required();
 
@@ -331,7 +331,8 @@ auto& get_resource_module() noexcept
 
 void init(CLI::App &app)
 {
-  app.set_version_flag("-V,--version", get_version());
+        static std::string version_str = get_version();
+        app.set_version_flag("-V,--version", version_str);
 
         app.add_flag("-d,--debug",
                 [] (auto) { log::set_debug(true); }, "Debug output");
@@ -346,6 +347,17 @@ void init(CLI::App &app)
         add_cmd_port(app);
 
         app.require_subcommand(1);
+}
+
+// Keep a single persistent CLI app instance to avoid repeated dynamic allocations and destructor crashes
+CLI::App& get_usbip_app() {
+    static CLI::App app("USB/IP Client & WebRTC Tunnel Utility");
+    static bool initialized = false;
+    if (!initialized) {
+        init(app);
+        initialized = true;
+    }
+    return app;
 }
 
 } // namespace
@@ -365,21 +377,14 @@ int usbipCLI(int argc, wchar_t *argv[]) {
     log::init();
     libusbip::set_debug_output(log::debug_msg);
 
-   if (!get_resource_module()) {
-      auto err = GetLastError();
-      log::critical("can't load '{}.dll', error {:#x} {}", "resources", err,
-                    format_message(err));
-      return EXIT_FAILURE;
-    }
-
     InitWinSock2 ws2;
     if (!ws2) {
         log::critical("can't initialize Windows Sockets 2, {}", get_last_error_msg());
         return EXIT_FAILURE;
     }
 
-    CLI::App app("USB/IP Client & WebRTC Tunnel Utility");
-    init(app);
+    CLI::App &app = get_usbip_app();
+    app.clear(); // Reset subcommand states and parsed values for the new invocation
 
     try {
         app.parse(argc, argv);
@@ -394,8 +399,6 @@ int wmain(int argc, wchar_t *argv[]) {
     log::init();
     libusbip::set_debug_output(log::debug_msg);
 
-    usbipCLI(argc, argv);
-
     InitWinSock2 ws2;
     if (!ws2) {
         log::critical("can't initialize Windows Sockets 2, {}", get_last_error_msg());
@@ -404,7 +407,6 @@ int wmain(int argc, wchar_t *argv[]) {
 
     std::signal(SIGINT, SignalHandler);
     bool tcp_only_flag = false;
-
 
     LoadConfigFromDisk(global_saved_room_id, global_saved_log_level, tcp_only_flag);
     SetupLogging(global_saved_log_level);
@@ -511,7 +513,6 @@ int wmain(int argc, wchar_t *argv[]) {
 
     initialize_session();
 
-    // Background thread or loop to wait for WebRTC Peer-to-Peer connection
     SPDLOG_INFO("Waiting for Peer-to-Peer WebRTC connection to establish...");
     while (keep_running && !webrtc_connected) {
         if (restart_session) {
@@ -543,9 +544,8 @@ int wmain(int argc, wchar_t *argv[]) {
                 break;
             }
 
-            // Parse command line into argc/argv format for usbipCLI
             std::vector<std::string> args_utf8;
-            args_utf8.push_back("usbip"); // program name placeholder
+            args_utf8.push_back("usbip");
 
             std::istringstream iss(command_line);
             std::string token;
@@ -563,7 +563,6 @@ int wmain(int argc, wchar_t *argv[]) {
                 argv_vec.push_back(wstr.data());
             }
 
-            // Invoke the modular CLI parser function safely
             try {
                 usbipCLI(static_cast<int>(argv_vec.size()), argv_vec.data());
             } catch (const std::exception &e) {
