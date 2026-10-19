@@ -32,7 +32,7 @@ typedef struct usbip_server_t usbip_server_t;
 
 usbip_server_t *usbip_server_create(void);
 void usbip_server_destroy(usbip_server_t *server);
-
+void usbip_server_enable_dynamic_devices(usbip_server_t *server, bool enabled);
 int  usbip_server_register_device(usbip_server_t *server, usb_device_t *dev);
 void usbip_server_stop(usbip_server_t *server);
 

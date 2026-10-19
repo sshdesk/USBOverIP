@@ -37,11 +37,18 @@ rtc::Thread* global_signaling_thread_ptr = nullptr;
 std::string global_saved_room_id;
 std::string global_saved_log_level;
 
+// Global parameters for passthrough vs dynamic mode
+static bool g_have_passthrough = false;
+static std::string g_passthrough_busid = "";
+static uint16_t g_passthrough_vid = 0;
+static uint16_t g_passthrough_pid = 0;
+static bool g_dynamic_mode = false;
+
 // Signal handler for Ctrl+C (SIGINT)
 void SignalHandler(int signum) {
     SPDLOG_WARN("Interrupt signal ({}) received. Shutting down gracefully...", signum);
     keep_running = false;
-    restart_session = false; // Stop any pending restart cycle so it proceeds to exit teardown
+    restart_session = false; 
 }
 
 // External C linkage for transmitting data back via DataChannel
@@ -60,20 +67,28 @@ bool rtc_data_channel_send(rtc_data_channel_t *dc, const void *data, size_t size
 void InitializeUsbIpServerSession() {
     if (g_server) return;
 
-    // Create server instance without hardcoded URL string
+    // Create server instance
     g_server = usbip_server_create();
     if (!g_server) {
         SPDLOG_ERROR("Failed to create USB/IP WebRTC server context.");
         return;
     }
 
-    // Register physical USB device passthrough (BusID 3-2, VID:PID) for mass storage 1-10   0781:558a 
-    usb_device_t *dev = usb_device_create_passthrough("1-10", 0x0781, 0x558A, INVALID_HANDLE_VALUE);
-    if (dev) {
-        usbip_server_register_device(g_server, dev);
-        SPDLOG_INFO("Successfully registered USB passthrough device.");
+    if (g_have_passthrough) {
+        usb_device_t *dev = usb_device_create_passthrough(g_passthrough_busid.c_str(), g_passthrough_vid, g_passthrough_pid, INVALID_HANDLE_VALUE);
+        if (dev) {
+            usbip_server_register_device(g_server, dev);
+            SPDLOG_INFO("Successfully registered fixed USB passthrough device [BusID: {}, VID:PID={:04X}:{:04X}].", g_passthrough_busid, g_passthrough_vid, g_passthrough_pid);
+        } else {
+            SPDLOG_WARN("Warning: Failed to capture physical USB device during startup.");
+        }
+    } else if (g_dynamic_mode) {
+        usbip_server_enable_dynamic_devices(g_server, true);
+        SPDLOG_INFO("USB/IP Server initialized in dynamic device mode. Devices will be captured upon client selection/import.");
     } else {
-        SPDLOG_WARN("Warning: Failed to capture physical USB device during startup.");
+        // Fallback default: enable dynamic devices if no passthrough specified
+        usbip_server_enable_dynamic_devices(g_server, true);
+        SPDLOG_INFO("USB/IP Server initialized with dynamic device selection enabled by default.");
     }
 }
 
@@ -83,7 +98,7 @@ public:
         if (native_data_channel) {
             SPDLOG_INFO("DataChannel state changed: {}", webrtc::DataChannelInterface::DataStateString(native_data_channel->state()));
             if (native_data_channel->state() == webrtc::DataChannelInterface::kOpen) {
-                SPDLOG_INFO("DataChannel Open! USB/IP starting usbip_server_on_channel_open .");
+                SPDLOG_INFO("DataChannel Open! USB/IP starting usbip_server_on_channel_open.");
                 if (g_server) {
                     usbip_server_on_channel_open(g_server);
                 }
@@ -211,7 +226,6 @@ public:
         }
         SPDLOG_INFO("==> [PEER CONNECTION STATE]: {}", pc_state);
 
-        // Trigger session restart when client disconnects, fails, or closes
         if (new_state == webrtc::PeerConnectionInterface::PeerConnectionState::kDisconnected ||
             new_state == webrtc::PeerConnectionInterface::PeerConnectionState::kFailed ||
             new_state == webrtc::PeerConnectionInterface::PeerConnectionState::kClosed) {
@@ -238,12 +252,54 @@ public:
 };
 CustomPeerConnectionObserver peer_connection_observer;
 
-int main() {
+static void print_usage(const char *prog) {
+    std::cout << "Usage:\n";
+    std::cout << "  " << prog << " [--list/-l]\n";
+    std::cout << "      List physical USB devices visible to the system.\n\n";
+    std::cout << "  " << prog << " [--passthrough <busid> <vid_hex> <pid_hex>]\n";
+    std::cout << "      Optional fixed mode: capture a single device at startup.\n\n";
+    std::cout << "  " << prog << " [--dynamic]\n";
+    std::cout << "      Dynamic mode: client requests device list and selects a device dynamically.\n";
+}
+
+int main(int argc, char *argv[]) {
+    // Parse command line arguments for USB config options
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--help" || arg == "-h") {
+            print_usage(argv[0]);
+            return 0;
+        }
+        if (arg == "--list" || arg == "-l") {
+            usb_device_list_physical_devices();
+            return 0;
+        }
+        if (arg == "--passthrough") {
+            if (i + 3 >= argc) {
+                std::cerr << "--passthrough requires BUSID VID PID\n";
+                return 2;
+            }
+            g_passthrough_busid = argv[++i];
+            g_passthrough_vid = (uint16_t)strtoul(argv[++i], NULL, 16);
+            g_passthrough_pid = (uint16_t)strtoul(argv[++i], NULL, 16);
+            g_have_passthrough = true;
+            g_dynamic_mode = false;
+        }
+        if (arg == "--dynamic") {
+            g_dynamic_mode = true;
+            g_have_passthrough = false;
+        }
+    }
+
+    // Default to dynamic mode if neither was explicitly specified
+    if (!g_have_passthrough && !g_dynamic_mode) {
+        g_dynamic_mode = true;
+    }
+
     // Register Ctrl+C (SIGINT) handler for graceful shutdown
     std::signal(SIGINT, SignalHandler);
 
     bool tcp_only_flag = false;
-
     std::unique_ptr<ScopedVBoxServiceManager> vbox_guard = nullptr;
     
     LoadConfigFromDisk(global_saved_room_id, global_saved_log_level, tcp_only_flag);
@@ -254,6 +310,7 @@ int main() {
 
     SPDLOG_INFO("=== USB/IP Server over WebRTC TCP Tunnel App ===");
     SPDLOG_INFO("TCP_ONLY Mode: [{}]", active_tcp_only ? "ENABLED" : "DISABLED");
+    SPDLOG_INFO("USBIP Mode: [{}]", g_have_passthrough ? "Fixed Passthrough" : "Dynamic Client-Selected");
     global_dc_observer = &data_channel_observer;
 
     if (!InitializeFirebaseFramework()) {

@@ -3,7 +3,13 @@ project(resources)
 
 add_library(resources SHARED)
 
-# --- 1. Find and Execute the Windows Message Compiler (mc.exe) ---
+# This ensures that both Debug and Release configurations dump directly 
+# into the top-level build tree root (e.g., build-cache-windows_debug/Debug/)
+set_target_properties(resources PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+)
+
 if(MSVC)
     # Define paths for the input message file and the generated output targets
     set(MC_INPUT_FILE "${CMAKE_CURRENT_SOURCE_DIR}/messages.mc")
@@ -28,7 +34,6 @@ else()
     set(RESOURCE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/resources.rc")
 endif()
 
-# --- 2. Attach Sources ---
 target_sources(resources
     PRIVATE
         ${RESOURCE_SOURCES}
@@ -75,4 +80,3 @@ target_link_options(resources
         /PDBALTPATH:%_PDB%
         $<$<CXX_COMPILER_ID:MSVC>:/NOENTRY>  
 )
-

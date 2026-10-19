@@ -145,6 +145,7 @@ add_executable(usbip-win2
     signaling.cpp
     tcptunnel.cpp
     webrtc_stats.cpp
+    usbip/userspace/usbip/usbip.rc
 )
 
 

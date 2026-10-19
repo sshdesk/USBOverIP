@@ -7,6 +7,7 @@
 #include <mutex>
 #include <csignal>
 #include <print>
+#include <sstream>
 
 #include "signaling.h"
 #include "webrtc_stats.h"
@@ -52,6 +53,7 @@ WebRtcTcpTunnelManager tunnel_manager(3240);
 
 std::atomic<bool> keep_running{true};
 std::atomic<bool> restart_session{false};
+std::atomic<bool> webrtc_connected{false};
 int global_choice = 1;
 rtc::Thread* global_signaling_thread_ptr = nullptr;
 std::string global_saved_room_id;
@@ -63,7 +65,6 @@ void SignalHandler(int signum) {
     keep_running = false;
     restart_session = false;
 }
-
 
 extern "C" {
     bool rtc_data_channel_send(rtc_data_channel_t *dc, const void *data, size_t size) {
@@ -144,6 +145,7 @@ public:
 
         if (new_state == webrtc::PeerConnectionInterface::kIceConnectionConnected && peer_connection) {
             peer_connection->GetStats(NominatedCandidatePairStatsCallback::Create());
+            webrtc_connected = true;
         }
     }
 
@@ -164,11 +166,15 @@ public:
         }
         SPDLOG_INFO("==> [PEER CONNECTION STATE]: {}", pc_state);
 
-        // Trigger session restart when client disconnects, fails, or closes
+        if (new_state == webrtc::PeerConnectionInterface::PeerConnectionState::kConnected) {
+            webrtc_connected = true;
+        }
+
         if (new_state == webrtc::PeerConnectionInterface::PeerConnectionState::kDisconnected ||
             new_state == webrtc::PeerConnectionInterface::PeerConnectionState::kFailed ||
             new_state == webrtc::PeerConnectionInterface::PeerConnectionState::kClosed) {
             SPDLOG_WARN("Peer connection state indicates client disconnection. Scheduling session restart...");
+            webrtc_connected = false;
             restart_session = true;
         }
     }
@@ -183,7 +189,6 @@ public:
     void OnRenegotiationNeeded() override {}
 };
 CustomPeerConnectionObserver peer_connection_observer;
-
 
 namespace {
 
@@ -279,7 +284,7 @@ void add_cmd_detach(CLI::App &app)
                 ->check(CLI::Range(1, MAX_HUB_PORTS));
 
         cmd->add_option("-a,--all", "Detach all devices")
-                ->each([&port = r->port] (const auto&) noexcept { port = vhci::port_all_closeonly; }) // will not be called if argument is not passed
+                ->each([&port = r->port] (const auto&) noexcept { port = vhci::port_all_closeonly; })
                 ->check(CLI::IsMember({"closeonly"}))
                 ->expected(0, 1)
                 ->excludes(opt_port);
@@ -316,7 +321,7 @@ void add_cmd_port(CLI::App &app)
                 ->expected(1, MAX_HUB_PORTS);
 }
 
-auto &msgtable_dll = L"resources"; // resource-only DLL that contains RT_MESSAGETABLE
+auto &msgtable_dll = L"resources";
 
 auto& get_resource_module() noexcept
 {
@@ -326,7 +331,7 @@ auto& get_resource_module() noexcept
 
 void init(CLI::App &app)
 {
-  app.set_version_flag("-V,--version", "1.0");
+  app.set_version_flag("-V,--version", get_version());
 
         app.add_flag("-d,--debug",
                 [] (auto) { log::set_debug(true); }, "Debug output");
@@ -356,17 +361,16 @@ const UsbIds& usbip::get_ids() {
     return ids;
 }
 
-// Unified Execution Entry Point matching wmain requirements
-int wmain(int argc, wchar_t *argv[]) {
-    // 1. Fire up baseline driver hooks and system environment checks
+int usbipCLI(int argc, wchar_t *argv[]) {
     log::init();
     libusbip::set_debug_output(log::debug_msg);
 
-    //if (!get_resource_module()) {
-    //    auto err = GetLastError();
-    //    log::critical("can't load '{}.dll', error {:#x} {}", "resources", err, format_message(err));
-    //    return EXIT_FAILURE;
-    //}
+   if (!get_resource_module()) {
+      auto err = GetLastError();
+      log::critical("can't load '{}.dll', error {:#x} {}", "resources", err,
+                    format_message(err));
+      return EXIT_FAILURE;
+    }
 
     InitWinSock2 ws2;
     if (!ws2) {
@@ -374,7 +378,6 @@ int wmain(int argc, wchar_t *argv[]) {
         return EXIT_FAILURE;
     }
 
-    // 2. Build and parse argument layout vectors
     CLI::App app("USB/IP Client & WebRTC Tunnel Utility");
     init(app);
 
@@ -384,7 +387,21 @@ int wmain(int argc, wchar_t *argv[]) {
         return app.exit(e);
     }
 
-    // 3. Fall into active WebRTC Tunnel loop infrastructure if any commands executed fine
+    return EXIT_SUCCESS;
+}
+
+int wmain(int argc, wchar_t *argv[]) {
+    log::init();
+    libusbip::set_debug_output(log::debug_msg);
+
+    usbipCLI(argc, argv);
+
+    InitWinSock2 ws2;
+    if (!ws2) {
+        log::critical("can't initialize Windows Sockets 2, {}", get_last_error_msg());
+        return EXIT_FAILURE;
+    }
+
     std::signal(SIGINT, SignalHandler);
     bool tcp_only_flag = false;
 
@@ -440,6 +457,7 @@ int wmain(int argc, wchar_t *argv[]) {
 
     std::cout << "\nSelect Execution Profile:\n1. Host Room (Caller Mode)\n2. Connect Room (Callee Mode)\nChoice: ";
     std::cin >> global_choice;
+    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
 
     auto initialize_session = [&]() {
         webrtc::PeerConnectionDependencies dependencies(&peer_connection_observer);
@@ -480,11 +498,11 @@ int wmain(int argc, wchar_t *argv[]) {
                 );
             }
         } else {
-      
             std::string input_room = global_saved_room_id;
             if (input_room.empty()) {
                 std::cout << "Enter target room identifier string token: ";
                 std::cin >> input_room;
+                std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
             }
             SaveConfigToDisk(input_room, global_saved_log_level, active_tcp_only);
             InitializeCalleeSignaling(input_room);
@@ -493,7 +511,9 @@ int wmain(int argc, wchar_t *argv[]) {
 
     initialize_session();
 
-    while (keep_running) {
+    // Background thread or loop to wait for WebRTC Peer-to-Peer connection
+    SPDLOG_INFO("Waiting for Peer-to-Peer WebRTC connection to establish...");
+    while (keep_running && !webrtc_connected) {
         if (restart_session) {
             restart_session = false;
             tunnel_manager.Stop();
@@ -502,6 +522,54 @@ int wmain(int argc, wchar_t *argv[]) {
             initialize_session();
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    if (webrtc_connected) {
+        SPDLOG_INFO("WebRTC connection established successfully. Starting interactive USB/IP CLI shell...");
+        std::cout << "\n[Connected via WebRTC] Enter USB/IP commands (e.g., attach -r 127.0.0.1 -b 1-1, or 'exit' to quit):\n";
+
+        std::string command_line;
+        while (keep_running && webrtc_connected) {
+            std::cout << "usbip> ";
+            if (!std::getline(std::cin, command_line)) {
+                break;
+            }
+
+            if (command_line.empty()) {
+                continue;
+            }
+
+            if (command_line == "exit" || command_line == "quit") {
+                break;
+            }
+
+            // Parse command line into argc/argv format for usbipCLI
+            std::vector<std::string> args_utf8;
+            args_utf8.push_back("usbip"); // program name placeholder
+
+            std::istringstream iss(command_line);
+            std::string token;
+            while (iss >> token) {
+                args_utf8.push_back(token);
+            }
+
+            std::vector<std::wstring> args_w;
+            for (const auto &arg : args_utf8) {
+                args_w.push_back(std::wstring(arg.begin(), arg.end()));
+            }
+
+            std::vector<wchar_t*> argv_vec;
+            for (auto &wstr : args_w) {
+                argv_vec.push_back(wstr.data());
+            }
+
+            // Invoke the modular CLI parser function safely
+            try {
+                usbipCLI(static_cast<int>(argv_vec.size()), argv_vec.data());
+            } catch (const std::exception &e) {
+                std::println(stderr, "CLI execution exception: {}", e.what());
+            }
+        }
     }
 
     tunnel_manager.Stop();
