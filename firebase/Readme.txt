@@ -24,6 +24,21 @@ python ../conan-deps/src/conan-cache-generator.py --build-project --type windows
 
 
 
+# to start usbipd 
+
+./usbipd
+
+
+# to start usbip-win2
+
+usbip-win2 list -r  192.168.0.19 
+
+usbip-win2 attach -r 192.168.0.19 --select
+
+usbip-win2 detach -a
+
+
+
 
 # For linux 
 

@@ -23,11 +23,25 @@ add_executable(usbip_server
 target_include_directories(usbip_server PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_definitions(usbip_server PRIVATE _CRT_SECURE_NO_WARNINGS WIN32_LEAN_AND_MEAN NOMINMAX)
 
+
+
+
 if(MSVC)
-    target_compile_options(usbip_server PRIVATE /W4 /O2 /EHsc)
+
+    target_compile_options(usbip_server PRIVATE /W4 /EHsc)
+    
+
+    target_compile_options(usbip_server PRIVATE 
+        $<$<CONFIG:Release>:/O2>
+        $<$<CONFIG:RelWithDebInfo>:/O2>
+        $<$<CONFIG:MinSizeRel>:/O1>
+    )
 else()
     target_compile_options(usbip_server PRIVATE -Wall -Wextra -O2)
 endif()
+
+
+
 
 target_link_libraries(usbip_server PRIVATE
     ws2_32

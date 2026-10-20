@@ -30,7 +30,7 @@ struct usb_device {
     bool     attached;
     bool     reserved;          /* CUSTOM_BIND accepted; awaiting USB/IP IMPORT */
     bool     detach_requested;  /* explicit CUSTOM_DETACH requested */
-    //uintptr_t active_socket;    /* owning USB/IP data socket while attached */
+    uintptr_t active_socket;    /* owning USB/IP data socket while attached */
     uint64_t reserved_at_ms;    /* reservation timeout guard */
 
     /* Backend-specific cleanup. */
