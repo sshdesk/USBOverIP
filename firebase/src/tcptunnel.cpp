@@ -187,7 +187,10 @@ void WebRtcTcpTunnelManager::Stop()
   if (listen_snap != INVALID_SOCKET)
     CloseSocketCrossPlatform(listen_snap);
   if (client_snap != INVALID_SOCKET)
+  {
+    SPDLOG_INFO("TCP Client connection closed due to server shutdown.");
     CloseSocketCrossPlatform(client_snap);
+  }
 
 #if defined(_WIN32) || defined(_WIN64)
   WSACleanup();
@@ -210,6 +213,15 @@ void WebRtcTcpTunnelManager::RunServerLoop()
     SOCKET client_sock = accept(listen_sock, nullptr, nullptr);
     if (client_sock != INVALID_SOCKET)
     {
+/*      // Single client enforcement logic
+      SOCKET expected = INVALID_SOCKET;
+      if (!client_socket_.compare_exchange_strong(expected, client_sock))
+      {
+        SPDLOG_ERROR("Connection rejected: Only a single TCP client is allowed at a time.");
+        CloseSocketCrossPlatform(client_sock);
+        continue;
+      }
+*/
       SPDLOG_INFO("TCP Local client connected.");
       EnableTcpKeepAlive(client_sock);
       SetSocketNonBlocking(client_sock);
@@ -249,7 +261,6 @@ void WebRtcTcpTunnelManager::RunTcpToWebRtcLoop(rtc::scoped_refptr<webrtc::DataC
       continue;
     }
 
-    // Guard: Ensure DataChannel is fully open before reading or writing data
     if (!data_channel || data_channel->state() != webrtc::DataChannelInterface::kOpen)
     {
       std::this_thread::sleep_for(std::chrono::milliseconds(20));

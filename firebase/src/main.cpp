@@ -19,7 +19,6 @@
 #include "firebase/app.h"
 #include "firebase/firestore.h"
 #include "vbox_service_manager.h"
-#include "tcptunnel.h"
 
 //#define COUNTER 1
 
@@ -28,7 +27,6 @@ rtc::scoped_refptr<webrtc::DataChannelInterface> native_data_channel = nullptr;
 webrtc::DataChannelObserver* global_dc_observer = nullptr;
 
 usbip_server_t* g_server = nullptr;
-WebRtcTcpTunnelManager tunnel_manager(3240);
 
 std::atomic<bool> keep_running{true};
 std::atomic<bool> restart_session{false};
@@ -376,12 +374,13 @@ int main(int argc, char *argv[]) {
                 native_data_channel = dc_result.MoveValue();
                 native_data_channel->RegisterObserver(global_dc_observer);
 
-                if (!tunnel_manager.Start()) {
+                SPDLOG_INFO("Caller DataChannel created.");
+  /*              if (!tunnel_manager.Start()) {
                     SPDLOG_ERROR("Failed to start tunnel manager because TCP bind failed on Caller.");
                 } else {
                     SPDLOG_INFO("Caller DataChannel created. Linking to TCP tunnel manager...");
                     tunnel_manager.HandleDataChannel(native_data_channel, global_signaling_thread_ptr);
-                }
+                }*/
             }
 
             if (!global_saved_room_id.empty()) {
@@ -429,7 +428,6 @@ int main(int argc, char *argv[]) {
             restart_session = false;
             SPDLOG_INFO("=== CLIENT DISCONNECTED: Restarting Server & Tunnel Manager ===");
 
-            tunnel_manager.Stop();
 
             native_data_channel = nullptr;
             peer_connection = nullptr;
@@ -446,7 +444,6 @@ int main(int argc, char *argv[]) {
 
     // Final shutdown teardown on Ctrl+C exit
     SPDLOG_INFO("Performing final cleanup teardown...");
-    tunnel_manager.Stop();
     peer_connection = nullptr;
     native_data_channel = nullptr;
 

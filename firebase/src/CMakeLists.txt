@@ -71,7 +71,6 @@ add_executable(usbipd
     main.cpp 
     signaling.cpp
     webrtc_stats.cpp
-    tcptunnel.cpp
     vbox_service_manager.cpp
 
     # USBIPD Source Files

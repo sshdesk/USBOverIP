@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(libusbip LANGUAGES CXX)
 
-add_library(libusbip SHARED)
+add_library(libusbip STATIC)
 
 target_sources(libusbip
     PRIVATE

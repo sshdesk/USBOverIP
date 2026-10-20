@@ -2,10 +2,14 @@
  * Copyright (c) 2023-2026 Vadym Hrynchyshyn <vadimgrn@gmail.com>
  */
 
+// #pragma once
+
+// #ifdef USBIP_EXPORTS
+//   #define USBIP_API __declspec(dllexport)
+// #else
+//   #define USBIP_API __declspec(dllimport)
+// #endif
+
 #pragma once
 
-#ifdef USBIP_EXPORTS
-  #define USBIP_API __declspec(dllexport)
-#else
-  #define USBIP_API __declspec(dllimport)
-#endif
+#define USBIP_API

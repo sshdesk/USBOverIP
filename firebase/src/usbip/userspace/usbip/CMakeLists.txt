@@ -55,7 +55,21 @@ target_link_libraries(usbip
         ws2_32 libusbip
 )
 
-target_compile_options(usbip
-    PRIVATE
-        /W4
-)
+
+if(MSVC)
+    target_compile_options(usbip
+        PRIVATE
+            /W4
+            # Generate program database symbols for the debugger
+            $<$<CONFIG:Debug>:/Zi>
+            # Embed debug records inside individual .obj structures 
+            # to prevent conflicts during static upstream linking
+            $<$<CONFIG:Debug>:/Z7>
+    )
+else()
+    target_compile_options(usbip
+        PRIVATE
+            -Wall
+            -Wextra
+    )
+endif()
