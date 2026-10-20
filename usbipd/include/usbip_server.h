@@ -15,10 +15,16 @@ typedef struct {
 #ifdef _WIN32
     SOCKET        listen_socket;
     SOCKET        active_client_socket;
+    /* Active USB import sessions; separate from short-lived control sockets.
+     * More than one USB device can be imported concurrently. */
+    SOCKET        active_import_sockets[MAX_DEVICES];
+    char          active_import_busids[MAX_DEVICES][SYSFS_BUS_ID_SIZE];
     HANDLE        client_done_event;
 #else
     int           listen_socket;
     int           active_client_socket;
+    int           active_import_sockets[MAX_DEVICES];
+    char          active_import_busids[MAX_DEVICES][SYSFS_BUS_ID_SIZE];
 #endif
 } usbip_server_t;
 

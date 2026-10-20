@@ -4,7 +4,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #ifdef _WIN32
   #include <windows.h>
@@ -74,21 +73,12 @@ static usb_device_t *find_device_by_busid(usbip_server_t *server, const char *bu
     return NULL;
 }
 
-static uint64_t monotonic_ms(void) {
+static void sleep_milliseconds(unsigned int milliseconds) {
 #ifdef _WIN32
-    return (uint64_t)GetTickCount64();
+    Sleep(milliseconds);
 #else
-    return (uint64_t)time(NULL) * 1000u;
+    usleep(milliseconds * 1000u);
 #endif
-}
-
-static void expire_reservation(usb_device_t *dev) {
-    if (dev && dev->reserved && dev->reserved_at_ms &&
-        monotonic_ms() - dev->reserved_at_ms > 30000u) {
-        printf("[USB/IP] BIND reservation for %s expired.\n", dev->busid);
-        dev->reserved = false;
-        dev->reserved_at_ms = 0;
-    }
 }
 
 static int send_custom_status(SOCKET sock, uint32_t command, uint32_t status) {
@@ -98,15 +88,114 @@ static int send_custom_status(SOCKET sock, uint32_t command, uint32_t status) {
     return send_exact(sock, reply, sizeof(reply));
 }
 
-static void remove_device_from_registry(usbip_server_t *server, usb_device_t *dev) {
-    for (int i = 0; i < server->num_devices; ++i) {
-        if (server->devices[i] == dev) {
-            for (int j = i; j + 1 < server->num_devices; ++j)
-                server->devices[j] = server->devices[j + 1];
-            server->devices[--server->num_devices] = NULL;
-            return;
+static bool dynamic_busid_exists(const char *busid) {
+    usb_physical_device_info_t physical[USB_PHYSICAL_DEVICE_MAX];
+    int count = usb_device_enumerate_physical_devices(physical, USB_PHYSICAL_DEVICE_MAX);
+    for (int i = 0; i < count; ++i) {
+        if (strcmp(physical[i].busid, busid) == 0) return true;
+    }
+    return false;
+}
+
+/* Locate a session by BUSID while holding the device lock. */
+static int find_import_session_slot(usbip_server_t *server, const char *busid) {
+    for (int i = 0; i < MAX_DEVICES; ++i) {
+        if (server->active_import_busids[i][0] &&
+            strcmp(server->active_import_busids[i], busid) == 0) return i;
+    }
+    return -1;
+}
+
+static int find_free_import_session_slot(usbip_server_t *server) {
+    for (int i = 0; i < MAX_DEVICES; ++i) {
+        if (!server->active_import_busids[i][0]) return i;
+    }
+    return -1;
+}
+
+/* Release only this import's session record and capture. Never clear another
+ * device's socket/session when multiple imports are active. */
+static void cleanup_import_session(usbip_server_t *server, usb_device_t *dev, SOCKET sock) {
+    char session_busid[SYSFS_BUS_ID_SIZE];
+    strncpy(session_busid, dev->busid, sizeof(session_busid) - 1);
+    session_busid[sizeof(session_busid) - 1] = '\0';
+    bool destroy_device = server->dynamic_devices;
+    lock_devices();
+    dev->attached = false;
+    if (server->dynamic_devices) {
+        for (int i = 0; i < server->num_devices; ++i) {
+            if (server->devices[i] == dev) {
+                for (int j = i + 1; j < server->num_devices; ++j)
+                    server->devices[j - 1] = server->devices[j];
+                server->devices[--server->num_devices] = NULL;
+                break;
+            }
         }
     }
+    unlock_devices();
+
+    if (destroy_device) {
+        usb_device_destroy(dev);
+        printf("[USB/IP] Capture for device released after session detach.\n");
+    }
+
+    lock_devices();
+    int slot = find_import_session_slot(server, session_busid);
+    if (slot >= 0 && server->active_import_sockets[slot] == sock) {
+        server->active_import_sockets[slot] = INVALID_SOCKET;
+        server->active_import_busids[slot][0] = '\0';
+    }
+    unlock_devices();
+}
+
+static uint32_t handle_custom_control(usbip_server_t *server, SOCKET sock,
+                                      uint32_t command, const char *busid) {
+    if (command == USBIP_CMD_CUSTOM_BIND) {
+        bool busy = false;
+        lock_devices();
+        usb_device_t *current = find_device_by_busid(server, busid);
+        if (current && current->attached) busy = true;
+        unlock_devices();
+        if (busy) return ST_DEV_BUSY;
+        if (server->dynamic_devices)
+            return dynamic_busid_exists(busid) ? ST_OK : ST_NODEV;
+        return current ? ST_OK : ST_NODEV;
+    }
+
+    if (command == USBIP_CMD_CUSTOM_DETACH) {
+        SOCKET import_socket = INVALID_SOCKET;
+        lock_devices();
+        int slot = find_import_session_slot(server, busid);
+        if (slot >= 0) import_socket = server->active_import_sockets[slot];
+        unlock_devices();
+
+        if (slot < 0) {
+            /* Idempotent detach: this BUSID has already cleaned up. */
+            return ST_OK;
+        }
+
+        if (import_socket != INVALID_SOCKET) {
+#ifdef _WIN32
+            (void)shutdown(import_socket, SD_BOTH);
+#else
+            (void)shutdown(import_socket, SHUT_RDWR);
+#endif
+        }
+
+        /* Wait for this BUSID's owning import thread to release its capture. */
+        for (unsigned int elapsed = 0; elapsed < 5000; elapsed += 10) {
+            bool still_active;
+            lock_devices();
+            still_active = find_import_session_slot(server, busid) >= 0;
+            unlock_devices();
+            if (!still_active) return ST_OK;
+            sleep_milliseconds(10);
+        }
+        fprintf(stderr, "[USB/IP] Timed out waiting for BUSID %s capture release.\n", busid);
+        return ST_ERROR;
+    }
+
+    return ST_ERROR;
 }
 
 static int handle_op_devlist(usbip_server_t *server, SOCKET sock) {
@@ -120,9 +209,7 @@ static int handle_op_devlist(usbip_server_t *server, SOCKET sock) {
         for (int i = 0; i < physical_count; ++i) {
             bool busy = false;
             for (int j = 0; j < server->num_devices; ++j) {
-                if (server->devices[j]) expire_reservation(server->devices[j]);
-                if (server->devices[j] &&
-                    (server->devices[j]->attached || server->devices[j]->reserved) &&
+                if (server->devices[j] && server->devices[j]->attached &&
                     strcmp(server->devices[j]->busid, physical[i].busid) == 0) {
                     busy = true;
                     break;
@@ -135,9 +222,7 @@ static int handle_op_devlist(usbip_server_t *server, SOCKET sock) {
          * hardware ID. Keep cached, detached exports visible in the list. */
         for (int j = 0; j < server->num_devices && physical_count < USB_PHYSICAL_DEVICE_MAX; ++j) {
             usb_device_t *cached = server->devices[j];
-            if (!cached) continue;
-            expire_reservation(cached);
-            if (cached->attached || cached->reserved) continue;
+            if (!cached || cached->attached) continue;
             bool present = false;
             for (int i = 0; i < physical_count; ++i) {
                 if (strcmp(physical[i].busid, cached->busid) == 0) { present = true; break; }
@@ -352,137 +437,8 @@ static int handle_urb_transfer_loop(usbip_server_t *server, SOCKET sock, usb_dev
 
     free(payload_in);
     free(payload_out);
-
-    bool release_capture = false;
-    lock_devices();
-    dev->attached = false;
-    dev->active_socket = 0;
-    release_capture = dev->detach_requested;
-    if (release_capture) {
-        printf("[USB/IP] Explicit DETACH: releasing captured device %s.\n", dev->busid);
-        remove_device_from_registry(server, dev);
-    }
-    unlock_devices();
-
-    printf("[USB/IP] Device %s detached.\n", dev->busid);
-    if (release_capture) usb_device_destroy(dev);
+    printf("[USB/IP] Transfer loop ended for device %s.\n", dev->busid);
     return 0;
-}
-
-static int handle_custom_bind(usbip_server_t *server, SOCKET sock) {
-    char busid[SYSFS_BUS_ID_SIZE] = {0};
-    if (recv_exact(sock, busid, sizeof(busid)) != 0) return -1;
-    busid[sizeof(busid) - 1] = '\0';
-    printf("[USB/IP] Received CUSTOM_BIND for BUSID '%s'.\n", busid);
-
-    uint32_t status = ST_OK;
-    lock_devices();
-    usb_device_t *dev = find_device_by_busid(server, busid);
-    if (dev) expire_reservation(dev);
-
-    if (dev && (dev->attached || dev->reserved)) {
-        status = ST_DEV_BUSY;
-    } else if (!dev && server->dynamic_devices) {
-        usb_physical_device_info_t physical[USB_PHYSICAL_DEVICE_MAX];
-        int count = usb_device_enumerate_physical_devices(physical, USB_PHYSICAL_DEVICE_MAX);
-        uint16_t vid = 0, pid = 0;
-        bool found = false;
-        for (int i = 0; i < count; ++i) {
-            if (strcmp(physical[i].busid, busid) == 0) {
-                vid = physical[i].vid;
-                pid = physical[i].pid;
-                found = true;
-                break;
-            }
-        }
-        if (found && server->num_devices < MAX_DEVICES) {
-            printf("[USB/IP] CUSTOM_BIND capturing %s (%04X:%04X).\n", busid, vid, pid);
-            dev = usb_device_create_passthrough(busid, vid, pid, INVALID_HANDLE_VALUE);
-            if (dev) server->devices[server->num_devices++] = dev;
-            else status = ST_DEV_ERR;
-        } else {
-            status = found ? ST_ERROR : ST_NODEV;
-        }
-    } else if (!dev) {
-        status = ST_NODEV;
-    }
-
-    if (status == ST_OK && dev) {
-        dev->reserved = true;
-        dev->reserved_at_ms = monotonic_ms();
-    }
-    unlock_devices();
-
-    if (status == ST_OK)
-        printf("[USB/IP] Device %s reserved for IMPORT.\n", busid);
-    else
-        printf("[USB/IP] CUSTOM_BIND rejected for %s (status=%u).\n", busid, status);
-
-    return send_custom_status(sock, USBIP_CMD_CUSTOM_BIND, status);
-}
-
-static int handle_custom_detach(usbip_server_t *server, SOCKET sock) {
-    char busid[SYSFS_BUS_ID_SIZE] = {0};
-    if (recv_exact(sock, busid, sizeof(busid)) != 0) return -1;
-    busid[sizeof(busid) - 1] = '\0';
-    printf("[USB/IP] Received CUSTOM_DETACH for BUSID '%s'.\n", busid);
-
-    SOCKET active_socket = INVALID_SOCKET;
-    usb_device_t *release_now = NULL;
-    uint32_t status = ST_OK;
-
-    lock_devices();
-    usb_device_t *dev = find_device_by_busid(server, busid);
-    if (dev) expire_reservation(dev);
-    if (!dev) {
-        status = ST_NODEV;
-    } else if (dev->attached) {
-        dev->detach_requested = true;
-        active_socket = (SOCKET)dev->active_socket;
-    } else {
-        /* No transfer thread owns it, so it is safe to release immediately. */
-        remove_device_from_registry(server, dev);
-        release_now = dev;
-    }
-    unlock_devices();
-
-    if (active_socket != INVALID_SOCKET) {
-#ifdef _WIN32
-        shutdown(active_socket, SD_BOTH);
-#else
-        shutdown(active_socket, SHUT_RDWR);
-#endif
-    }
-    if (release_now) usb_device_destroy(release_now);
-
-    /* For an active session, wait briefly for the transfer thread to leave its
-     * URB loop and release the captured device before acknowledging DETACH. */
-    if (status == ST_OK && active_socket != INVALID_SOCKET) {
-        const uint64_t deadline = monotonic_ms() + 5000u;
-        for (;;) {
-            lock_devices();
-            const bool still_registered = find_device_by_busid(server, busid) != NULL;
-            unlock_devices();
-            if (!still_registered) break;
-            if (monotonic_ms() >= deadline) {
-                status = ST_ERROR;
-                printf("[USB/IP] Timed out waiting for device %s to release.\n", busid);
-                break;
-            }
-#ifdef _WIN32
-            Sleep(10);
-#else
-            usleep(10000);
-#endif
-        }
-    }
-
-    if (status == ST_OK)
-        printf("[USB/IP] CUSTOM_DETACH accepted for %s.\n", busid);
-    else
-        printf("[USB/IP] CUSTOM_DETACH could not find %s.\n", busid);
-
-    return send_custom_status(sock, USBIP_CMD_CUSTOM_DETACH, status);
 }
 
 static int handle_op_import(usbip_server_t *server, SOCKET sock, const usbip_op_common_t *hdr) {
@@ -499,7 +455,6 @@ static int handle_op_import(usbip_server_t *server, SOCKET sock, const usbip_op_
 
     lock_devices();
     usb_device_t *dev = find_device_by_busid(server, busid);
-    if (dev) expire_reservation(dev);
     if (!dev && server->dynamic_devices) {
         usb_physical_device_info_t physical[USB_PHYSICAL_DEVICE_MAX];
         int count = usb_device_enumerate_physical_devices(physical, USB_PHYSICAL_DEVICE_MAX);
@@ -544,26 +499,34 @@ static int handle_op_import(usbip_server_t *server, SOCKET sock, const usbip_op_
     }
 
     /* Reserve it before releasing the lock so simultaneous IMPORT requests
-     * cannot both attach the same device. */
-    dev->reserved = false;
-    dev->reserved_at_ms = 0;
-    dev->detach_requested = false;
+     * cannot both attach the same device. Track the data socket separately
+     * from short-lived LIST/BIND/DETACH control connections. */
+    int session_slot = find_free_import_session_slot(server);
+    if (session_slot < 0) {
+        unlock_devices();
+        rep.status = htonl(ST_DEV_BUSY);
+        (void)send_exact(sock, &rep, sizeof(rep));
+        return -1;
+    }
     dev->attached = true;
-    dev->active_socket = (uintptr_t)sock;
+    server->active_import_sockets[session_slot] = sock;
+    strncpy(server->active_import_busids[session_slot], busid,
+            sizeof(server->active_import_busids[session_slot]) - 1);
+    server->active_import_busids[session_slot][sizeof(server->active_import_busids[session_slot]) - 1] = '\0';
     usb_device_fill_op_info(dev, &rep.udev);
     rep.status = htonl(ST_OK);
     unlock_devices();
 
     if (send_exact(sock, &rep, sizeof(rep)) != 0) {
-        lock_devices();
-        dev->attached = false;
-        dev->active_socket = 0;
-        unlock_devices();
+        cleanup_import_session(server, dev, sock);
         return -1;
     }
 
-    /* Hand off connection to the URB transfer phase. */
-    return handle_urb_transfer_loop(server, sock, dev);
+    /* The import thread owns cleanup. Explicit DETACH only shuts down this
+     * socket and waits for this thread to release the physical capture. */
+    int transfer_result = handle_urb_transfer_loop(server, sock, dev);
+    cleanup_import_session(server, dev, sock);
+    return transfer_result;
 }
 
 #ifdef _WIN32
@@ -577,33 +540,40 @@ static void *client_thread_proc(void *arg) {
     free(carg);
 
     while (server->running) {
-        /* Read four bytes first so custom 32-bit commands can share this TCP
-         * port with standard USB/IP management packets. */
+        usbip_op_common_t op_hdr;
         uint32_t first_word = 0;
         if (recv_exact(sock, &first_word, sizeof(first_word)) != 0) break;
         uint32_t custom_command = ntohl(first_word);
 
         if (custom_command == USBIP_CMD_CUSTOM_LIST) {
-            if (handle_op_devlist(server, sock) != 0) break;
+            printf("[USB/IP] Received CUSTOM_LIST.\n");
+            (void)handle_op_devlist(server, sock);
+            break; /* LIST uses one request/reply connection. */
+        }
+        if (custom_command == USBIP_CMD_CUSTOM_BIND ||
+            custom_command == USBIP_CMD_CUSTOM_DETACH) {
+            char busid[SYSFS_BUS_ID_SIZE] = {0};
+            if (recv_exact(sock, busid, sizeof(busid)) != 0) break;
+            busid[sizeof(busid) - 1] = '\0';
+            printf("[USB/IP] Received %s for BUSID '%s'.\n",
+                   custom_command == USBIP_CMD_CUSTOM_BIND ? "CUSTOM_BIND" : "CUSTOM_DETACH",
+                   busid);
+            uint32_t status = handle_custom_control(server, sock, custom_command, busid);
+            if (send_custom_status(sock, custom_command, status) != 0) break;
+            printf("[USB/IP] %s BUSID %s: status=%u\n",
+                   custom_command == USBIP_CMD_CUSTOM_BIND ? "CUSTOM_BIND" : "CUSTOM_DETACH",
+                   busid, status);
             continue;
         }
-        if (custom_command == USBIP_CMD_CUSTOM_BIND) {
-            (void)handle_custom_bind(server, sock);
-            break;
-        }
-        if (custom_command == USBIP_CMD_CUSTOM_DETACH) {
-            (void)handle_custom_detach(server, sock);
-            break;
-        }
 
-        usbip_op_common_t op_hdr;
+        /* Otherwise this is the first half of a standard 8-byte USB/IP
+         * management header. Reconstruct it and parse normally. */
         memcpy(&op_hdr, &first_word, sizeof(first_word));
         if (recv_exact(sock, ((char *)&op_hdr) + sizeof(first_word),
                        sizeof(op_hdr) - sizeof(first_word)) != 0) break;
 
         uint16_t version = ntohs(op_hdr.version);
         uint16_t command = ntohs(op_hdr.command);
-
         if (version != USBIP_VERSION) {
             printf("[USB/IP] Version mismatch: 0x%04x (expected 0x%04x)\n", version, USBIP_VERSION);
             break;
@@ -613,8 +583,8 @@ static void *client_thread_proc(void *arg) {
             if (handle_op_devlist(server, sock) != 0) break;
         }
         else if (command == OP_REQ_IMPORT) {
-            if (handle_op_import(server, sock, &op_hdr) != 0) break;
-            break; /* Once imported, connection terminates after detach */
+            (void)handle_op_import(server, sock, &op_hdr);
+            break; /* Import thread owns socket and capture cleanup. */
         }
         else {
             printf("[USB/IP] Unknown management command: 0x%04x\n", command);
@@ -642,6 +612,10 @@ usbip_server_t *usbip_server_create(uint16_t port) {
     server->running = false;
     server->listen_socket = INVALID_SOCKET;
     server->active_client_socket = INVALID_SOCKET;
+    for (int i = 0; i < MAX_DEVICES; ++i) {
+        server->active_import_sockets[i] = INVALID_SOCKET;
+        server->active_import_busids[i][0] = '\0';
+    }
 #ifdef _WIN32
     server->client_done_event = CreateEventA(NULL, TRUE, TRUE, NULL);
     if (!server->client_done_event) {
