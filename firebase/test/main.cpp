@@ -1,313 +1,276 @@
 #include <iostream>
 #include <string>
-#include <memory>
-#include <vector>
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <chrono>
+#include <cstdlib>
+#include <ctime>
+#include <csignal>
+#include <memory>
+#include <map>
 
 #include "signaling.h"
-#include "webrtc_stats.h"
-
-
-
-#include "api/create_peerconnection_factory.h"
-#include "api/peer_connection_interface.h"
-#include "rtc_base/thread.h"
-
+#include "webrtc.h"
 #include "firebase/app.h"
 #include "firebase/firestore.h"
 
-#define COUNTER 1
-
-rtc::scoped_refptr<webrtc::PeerConnectionInterface> peer_connection = nullptr;
-rtc::scoped_refptr<webrtc::DataChannelInterface> native_data_channel = nullptr;
-webrtc::DataChannelObserver* global_dc_observer = nullptr;
-
-
-
 std::atomic<bool> keep_running{true};
+std::atomic<bool> is_datachannel_connected{false};
+std::string shared_input_buffer = "";
+std::mutex input_mutex;
+std::mutex clients_mutex;
 
+std::string active_room_id = ""; 
+std::string global_client_id = "";
 
+std::map<std::string, std::unique_ptr<WebRtcManager>> connected_clients;
+std::unique_ptr<WebRtcManager> core_server_connection = nullptr;
 
+bool host_server = false;
 
-class CustomDataChannelObserver : public webrtc::DataChannelObserver {
-public:
-    void OnStateChange() override {
-        if (native_data_channel) {
-            SPDLOG_INFO("DataChannel state changed: {}", webrtc::DataChannelInterface::DataStateString(native_data_channel->state()));
-            if (native_data_channel->state() == webrtc::DataChannelInterface::kOpen) {
-                SPDLOG_INFO("DataChannel Open! USB/IP TCP tunnel active.");
-            
-            } else if (native_data_channel->state() == webrtc::DataChannelInterface::kClosed ||
-                       native_data_channel->state() == webrtc::DataChannelInterface::kClosing) {
-               
-            }
-        }
-    }
+void SignalExitHandler(int signum) {
+    SPDLOG_WARN("\nProcess termination signal [{}] intercepted!", signum);
+    keep_running = false;
+}
 
- 
-
-
-    #if COUNTER
-    
-    void OnMessage(const webrtc::DataBuffer& buffer) override {
-        const uint8_t* data_ptr = buffer.data.data();
-        size_t data_size = buffer.data.size();
-
-        // Ensure we received at least an 8-byte counter from the client
-        if (data_size >= sizeof(uint64_t)) {
-            uint64_t client_counter = 0;
-            std::memcpy(&client_counter, data_ptr, sizeof(uint64_t));
-            
-            // Print the incremental number received from the script
-            SPDLOG_INFO("[SERVER RECEIVED] Client Counter #{}", client_counter);
+void AttachDataChannelCallback(WebRtcManager* manager) {
+    if (!manager) return;
+    manager->SetDataChannelStateCallback([](bool is_open) {
+        is_datachannel_connected = is_open;
+        if (is_open) {
+            SPDLOG_INFO("[Heartbeat Manager] DataChannel opened. Pausing Firebase polling & switching to 500ms loop.");
         } else {
-            SPDLOG_INFO("PEER BINARY MESSAGE [{} bytes]", data_size);
+            SPDLOG_WARN("[Heartbeat Manager] DataChannel closed. Resuming Firebase polling & switching to 30ms loop.");
         }
-
-        static uint64_t server_packet_counter = 0;
-        uint64_t current_server_count = ++server_packet_counter;
-
-        // Prepare response binary payload containing the server's incrementing counter (8 bytes)
-        std::vector<uint8_t> response_data;
-        const uint8_t* count_bytes = reinterpret_cast<const uint8_t*>(&current_server_count);
-        response_data.insert(response_data.end(), count_bytes, count_bytes + sizeof(current_server_count));
-
-        // Send back binary data over the data channel
-        if (native_data_channel && native_data_channel->state() == webrtc::DataChannelInterface::kOpen) {
-            rtc::CopyOnWriteBuffer reply_buffer(response_data.data(), response_data.size());
-            webrtc::DataBuffer data_buffer(reply_buffer, true); // true = binary mode
-            native_data_channel->Send(data_buffer);
-            
-            // Print the incremental number sent from the server side
-            SPDLOG_INFO("[SERVER SENT] Echo Counter #{}", current_server_count);
-        }
-    }
-#endif
-
-
-    void OnBufferedAmountChange(uint64_t previous_amount) override {}
-};
-CustomDataChannelObserver data_channel_observer;
-
-class CustomPeerConnectionObserver : public webrtc::PeerConnectionObserver {
-public:
-    void OnIceCandidate(const webrtc::IceCandidateInterface* candidate) override {
-        if (active_room_id.empty() || !db) return;
-
-        std::string candidate_str;
-        if (!candidate->ToString(&candidate_str)) return;
-
-        std::string sdp_mid = candidate->sdp_mid();
-        int sdp_mline_index = candidate->sdp_mline_index();
-        std::string protocol = (candidate_str.find(" tcp ") != std::string::npos) ? "TCP" : "UDP";
-
-        SPDLOG_INFO("[LOCAL ICE CANDIDATE GATHERED]");
-        SPDLOG_INFO("  |--> Protocol:      {}", protocol);
-        SPDLOG_INFO("  |--> sdpMid:        {}", sdp_mid);
-        SPDLOG_INFO("  |--> sdpMLineIndex: {}", sdp_mline_index);
-        SPDLOG_INFO("  |--> Candidate SDP: {}", candidate_str);
-
-        if (active_tcp_only && protocol == "UDP") {
-            SPDLOG_WARN("TCP_ONLY mode active: Filtered out local UDP ICE candidate.");
-            return;
-        }
-
-        firebase::firestore::MapFieldValue cand_payload = {
-            {"candidate", firebase::firestore::FieldValue::String(candidate_str)},
-            {"sdpMid", firebase::firestore::FieldValue::String(sdp_mid)},
-            {"sdpMLineIndex", firebase::firestore::FieldValue::Integer(sdp_mline_index)}
-        };
-
-        std::string sub_collection = (native_data_channel != nullptr) ? "callerCandidates" : "calleeCandidates";
-        
-        db->Collection("rooms").Document(active_room_id)
-          .Collection(sub_collection).Add(cand_payload);
-    }
-
-    void OnIceConnectionChange(webrtc::PeerConnectionInterface::IceConnectionState new_state) override {
-        std::string state_str;
-        switch (new_state) {
-            case webrtc::PeerConnectionInterface::kIceConnectionNew:          state_str = "NEW"; break;
-            case webrtc::PeerConnectionInterface::kIceConnectionChecking:     state_str = "CHECKING (Pairing candidate checks in progress)"; break;
-            case webrtc::PeerConnectionInterface::kIceConnectionConnected:    state_str = "CONNECTED (Pair Nominated & Selected)"; break;
-            case webrtc::PeerConnectionInterface::kIceConnectionCompleted:    state_str = "COMPLETED (All ICE checks completed)"; break;
-            case webrtc::PeerConnectionInterface::kIceConnectionFailed:       state_str = "FAILED (Candidate pairing timed out)"; break;
-            case webrtc::PeerConnectionInterface::kIceConnectionDisconnected: state_str = "DISCONNECTED"; break;
-            case webrtc::PeerConnectionInterface::kIceConnectionClosed:       state_str = "CLOSED"; break;
-            default: state_str = "UNKNOWN"; break;
-        }
-        SPDLOG_INFO("==> [ICE CONNECTION STATE]: {}", state_str);
-
-        if (new_state == webrtc::PeerConnectionInterface::kIceConnectionConnected && peer_connection) {
-            peer_connection->GetStats(NominatedCandidatePairStatsCallback::Create());
-        }
-    }
-
-    void OnIceGatheringChange(webrtc::PeerConnectionInterface::IceGatheringState new_state) override {
-        std::string g_state = (new_state == webrtc::PeerConnectionInterface::kIceGatheringGathering) ? "GATHERING" : "COMPLETE";
-        SPDLOG_INFO("==> [ICE GATHERING STATE]: {}", g_state);
-    }
-
-    void OnConnectionChange(webrtc::PeerConnectionInterface::PeerConnectionState new_state) override {
-        std::string pc_state;
-        switch (new_state) {
-            case webrtc::PeerConnectionInterface::PeerConnectionState::kNew:          pc_state = "New"; break;
-            case webrtc::PeerConnectionInterface::PeerConnectionState::kConnecting:   pc_state = "Connecting (DTLS Handshake processing)"; break;
-            case webrtc::PeerConnectionInterface::PeerConnectionState::kConnected:    pc_state = "Connected (DTLS Secure Handshake Complete, P2P Ready)"; break;
-            case webrtc::PeerConnectionInterface::PeerConnectionState::kDisconnected: pc_state = "Disconnected"; break;
-            case webrtc::PeerConnectionInterface::PeerConnectionState::kFailed:       pc_state = "Failed"; break;
-            case webrtc::PeerConnectionInterface::PeerConnectionState::kClosed:       pc_state = "Closed"; break;
-        }
-        SPDLOG_INFO("==> [PEER CONNECTION STATE]: {}", pc_state);
-    }
-
-    void OnDataChannel(rtc::scoped_refptr<webrtc::DataChannelInterface> data_channel) override {
-        SPDLOG_INFO("--> Remote DataChannel negotiated and attached.");
-        native_data_channel = data_channel;
-        native_data_channel->RegisterObserver(global_dc_observer);
-
-        // Initialize USB/IP server session context on remote data channel attachment
-      
-
-
-
-        SPDLOG_INFO("WebRTC Remote peer opened DataChannel. Linking to TCP tunnel manager...");
-      
-    }
-
-    void OnSignalingChange(webrtc::PeerConnectionInterface::SignalingState new_state) override {}
-    void OnIceCandidatesRemoved(const std::vector<cricket::Candidate>& candidates) override {}
-    void OnRenegotiationNeeded() override {}
-};
-CustomPeerConnectionObserver peer_connection_observer;
+    });
+}
 
 int main() {
-    std::string saved_room_id, saved_log_level;
-    bool tcp_only_flag = false;
+    SetupLogging("info");
+    std::srand(static_cast<unsigned int>(std::time(nullptr)));
 
-    
-    rtc::LogMessage::LogToDebug(rtc::LoggingSeverity::LS_ERROR);
-    
-    LoadConfigFromDisk(saved_room_id, saved_log_level, tcp_only_flag);
-    SetupLogging(saved_log_level);
-    active_tcp_only = tcp_only_flag;
+    std::signal(SIGINT, SignalExitHandler);
+    std::signal(SIGTERM, SignalExitHandler);
 
-    SPDLOG_INFO("=== USB/IP Server over WebRTC TCP Tunnel App ===");
-    SPDLOG_INFO("TCP_ONLY Mode: [{}]", active_tcp_only ? "ENABLED" : "DISABLED");
-    global_dc_observer = &data_channel_observer;
+    global_client_id = "cpp_peer_" + std::to_string(std::rand() % 90000 + 1000);
 
     if (!InitializeFirebaseFramework()) {
-        SPDLOG_ERROR("Initialization Fault: Check google-services.json context.");
+        SPDLOG_ERROR("Firebase setup crash exception encountered.");
         return -1;
     }
-    SPDLOG_INFO("Successfully authenticated with Firebase Database.");
+    SPDLOG_INFO("Successfully authenticated with Cloud Firestore.");
+    SPDLOG_INFO("Your Client Identity Token: [{}]", global_client_id);
 
-    std::unique_ptr<rtc::Thread> network_thread = rtc::Thread::CreateWithSocketServer();
-    std::unique_ptr<rtc::Thread> worker_thread = rtc::Thread::Create();
-    std::unique_ptr<rtc::Thread> signaling_thread = rtc::Thread::Create();
-    network_thread->Start(); worker_thread->Start(); signaling_thread->Start();
+    std::string saved_room_id = "";
+    std::string saved_log_level = "info";
+    LoadConfigFromDisk(saved_room_id, saved_log_level);
 
-    webrtc::PeerConnectionInterface::RTCConfiguration config;
-    webrtc::PeerConnectionInterface::IceServer server;
-    
-    // TURN/STUN Server assignment (use TCP port for STUN/TURN if TCP_ONLY is true)
-    if (active_tcp_only) {
-        server.urls.push_back("stun:stun.l.google.com:19302");
-        //server.urls.push_back("stun:global.stun.twilio.com:3478?transport=tcp");
-        config.tcp_candidate_policy = webrtc::PeerConnectionInterface::kTcpCandidatePolicyEnabled;
-        
-    } else {
-        server.urls.push_back("stun:stun.l.google.com:19302");
-    }
-    config.servers.push_back(server);
-
-    webrtc::PeerConnectionFactoryDependencies factory_deps;
-    factory_deps.network_thread = network_thread.get();
-    factory_deps.worker_thread = worker_thread.get();
-    factory_deps.signaling_thread = signaling_thread.get();
-
-    auto factory = webrtc::CreateModularPeerConnectionFactory(std::move(factory_deps));
-
-    if (!factory) {
-        SPDLOG_ERROR("Fatal Error: Failed to build modular WebRTC PC Factory Interface.");
-        return -1;
-    }
-
-    webrtc::PeerConnectionDependencies dependencies(&peer_connection_observer);
-    auto pc_result = factory->CreatePeerConnectionOrError(config, std::move(dependencies));
-    if (!pc_result.ok()) return -1;
-    peer_connection = pc_result.MoveValue();
-
-    std::cout << "\nSelect Execution Profile:\n1. Host Room (Caller Mode)\n2. Connect Room (Callee Mode)\nChoice: ";
-    int choice;
-    std::cin >> choice;
-
-    if (choice == 1) {
-        webrtc::DataChannelInit dc_config;
-        dc_config.maxRetransmits = std::nullopt; 
-        dc_config.maxRetransmitTime = std::nullopt;
-        dc_config.ordered = true; // Strict ordering for USB/IP URB packets
-
-        auto dc_result = peer_connection->CreateDataChannelOrError("usbip-tcp-channel", &dc_config);
-        if (dc_result.ok()) {
-            native_data_channel = dc_result.MoveValue();
-            native_data_channel->RegisterObserver(global_dc_observer);
-
-         
-                SPDLOG_INFO("Caller DataChannel created. Linking to TCP tunnel manager...");
-         
+    std::string input_room;
+    if (!saved_room_id.empty()) {
+        char use_saved = 'y';
+        std::cout << "Found cached room identifier token: [" << saved_room_id << "]\n";
+        std::cout << "Use saved token? (y/n): ";
+        std::cin >> use_saved;
+        if (use_saved == 'y' || use_saved == 'Y') {
+            input_room = saved_room_id;
         }
+        std::cin.ignore();
+    }
 
-        if (!saved_room_id.empty()) {
-            SPDLOG_INFO("Found cached room ID: {}. Validating with Firebase...", saved_room_id);
-            ValidateAndInitializeCaller(saved_room_id);
+    if (input_room.empty()) {
+        std::cout << "Enter target room identifier string token (or leave blank to create a new room): ";
+        std::getline(std::cin, input_room);
+    }
+
+    if (input_room.empty()) {
+        active_room_id = GenerateRandomRoomId(20);
+        host_server = true; 
+        SPDLOG_INFO("[Room Creation] Generated fresh room key and set role to Host Server: {}", active_room_id);
+    } else {
+        active_room_id = input_room;
+        host_server = IsRoomEmpty(active_room_id); 
+        SPDLOG_INFO("[Room Join] Target room ID: {}. Assigned Role -> {}", active_room_id, host_server ? "Host Server" : "Client");
+    }
+
+    SaveConfigToDisk(active_room_id, "info");
+
+    SPDLOG_INFO("Evaluating capacity constraints for room matrix [{}]...", active_room_id);
+    if (!VerifyAndReserveRoomCapacity(active_room_id)) {
+        std::cout << "\n[CRITICAL REJECT] Access Denied: Room capacity limit reached.\n" << std::endl;
+        ShutdownFirebaseFramework(nullptr);
+        return -1;
+    }
+
+    if (!host_server) {
+        SPDLOG_INFO("[Client Init] Instantiating WebRtcManager caller node to generate connection offer...");
+        core_server_connection = std::make_unique<WebRtcManager>(active_room_id, global_client_id, true);
+        AttachDataChannelCallback(core_server_connection.get());
+        core_server_connection->SetRemotePeerId("ALL");
+        if (core_server_connection->Initialize()) {
+            core_server_connection->StartConnectionSequence();
+        }
+    }
+
+    RegisterOnRoomReadyEvent([&](const std::string& ready_room_id) {
+        SPDLOG_WARN("=================================================================");
+        SPDLOG_WARN("[EVENT TRIGGERED] Room [{}] is full and ready for meeting!", ready_room_id);
+        SPDLOG_WARN("=================================================================");
+    });
+
+    RegisterOnPeerLeftEvent([&](const std::string& peer_client_id) {
+        SPDLOG_ERROR("=================================================================");
+        SPDLOG_ERROR("[EVENT NOTICE] Peer [{}] has disconnected or left the room.", peer_client_id);
+        SPDLOG_ERROR("=================================================================");
+        
+        if (host_server) {
+            std::lock_guard<std::mutex> lock(clients_mutex);
+            auto it = connected_clients.find(peer_client_id);
+            if (it != connected_clients.end()) {
+                it->second->ShutdownConnection();
+                connected_clients.erase(it);
+            }
+            is_datachannel_connected = false;
+            SPDLOG_INFO("[WebRTC State Reset] Standing by as Host. Waiting for new peer connection...");
         } else {
-            SPDLOG_INFO("No saved room found. Creating new room...");
-            peer_connection->CreateOffer(
-                new rtc::RefCountedObject<CallerCreateSessionDescriptionObserver>(), 
-                webrtc::PeerConnectionInterface::RTCOfferAnswerOptions()
-            );
+            if (core_server_connection) {
+                core_server_connection->ShutdownConnection();
+                core_server_connection = nullptr;
+            }
+            SPDLOG_WARN("Host disconnected. Exiting signaling session room.");
+            keep_running = false;
         }
-    } else {
-        std::string input_room;
-        
-        // Check if room ID / token is already available in the settings/config file
-        if (!saved_room_id.empty()) {
-            char use_saved = 'y';
-            std::cout << "Found cached room identifier token in settings file: [" << saved_room_id << "]\n";
-            std::cout << "Do you want to use this saved token? (y/n): ";
-            std::cin >> use_saved;
-            
-            if (use_saved == 'y' || use_saved == 'Y') {
-                input_room = saved_room_id;
+    });
+
+    RegisterOnSdpReceivedEvent([&](const std::string& sender_id, const std::string& type, const std::string& sdp) {
+        SPDLOG_INFO("[Signaling Event] Received remote SDP {} from peer: {}", type, sender_id);
+        if (sender_id == global_client_id) return;
+
+        if (host_server) {
+            std::lock_guard<std::mutex> lock(clients_mutex);
+            if (connected_clients.find(sender_id) == connected_clients.end()) {
+                SPDLOG_INFO("[Server Hub] Spawning new WebRtcManager instance for incoming client: {}", sender_id);
+                auto client_rtc = std::make_unique<WebRtcManager>(active_room_id, global_client_id, false);
+                AttachDataChannelCallback(client_rtc.get());
+                client_rtc->SetRemotePeerId(sender_id);
+                if (client_rtc->Initialize()) {
+                    connected_clients[sender_id] = std::move(client_rtc);
+                }
+            }
+            connected_clients[sender_id]->SetRemotePeerId(sender_id);
+            connected_clients[sender_id]->HandleRemoteSdp(type, sdp);
+        } else {
+            if (core_server_connection) {
+                core_server_connection->SetRemotePeerId(sender_id);
+                core_server_connection->HandleRemoteSdp(type, sdp);
+            }
+        }
+    });
+
+    RegisterOnIceReceivedEvent([&](const std::string& sender_id, const std::string& mid, int mline_index, const std::string & sdp) {
+        SPDLOG_INFO("[Signaling Event] Received remote ICE candidate (sdpMid: {}, sdpMLineIndex: {}) from peer: {}", mid, mline_index, sender_id);
+        if (sender_id == global_client_id) return;
+
+        if (host_server) {
+            std::lock_guard<std::mutex> lock(clients_mutex);
+            auto it = connected_clients.find(sender_id);
+            if (it != connected_clients.end() && it->second) {
+                it->second->SetRemotePeerId(sender_id);
+                it->second->HandleRemoteIceCandidate(mid, mline_index, sdp);
+            }
+        } else {
+            if (core_server_connection) {
+                core_server_connection->SetRemotePeerId(sender_id);
+                core_server_connection->HandleRemoteIceCandidate(mid, mline_index, sdp);
+            }
+        }
+    });
+
+    SetUserPresence(active_room_id, global_client_id, true);
+    ListenForTargetedMessages(active_room_id, global_client_id);
+
+    std::cout << "\n=======================================================" << std::endl;
+    std::cout << "MESSAGE FORMAT RULES:" << std::endl;
+    std::cout << " -> To Broadcast to everyone use  -> ALL:<your message>" << std::endl;
+    std::cout << " -> To Message a specific peer use -> peer_id:<your message>" << std::endl;
+    std::cout << " -> Type '/exit' or use Ctrl+C to terminate app." << std::endl;
+    std::cout << "=======================================================\n" << std::endl;
+
+    std::thread input_thread([&]() {
+        while (keep_running) {
+            std::string raw_input;
+            if (std::getline(std::cin, raw_input)) {
+                if (raw_input == "/exit") {
+                    keep_running = false;
+                    break;
+                }
+                std::lock_guard<std::mutex> lock(input_mutex);
+                shared_input_buffer = raw_input;
+            }
+        }
+    });
+
+    auto last_heartbeat_time = std::chrono::steady_clock::now();
+
+    while (keep_running) {
+        int sleep_ms = is_datachannel_connected ? 500 : 30;
+        std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+
+        if (is_datachannel_connected) {
+            last_heartbeat_time = std::chrono::steady_clock::now();
+        } else {
+            auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::seconds>(now - last_heartbeat_time).count() >= 5) {
+                SetUserPresence(active_room_id, global_client_id, true);
+                last_heartbeat_time = now;
             }
         }
 
-        // If not available or declined, prompt the user for input
-        if (input_room.empty()) {
-            std::cout << "Enter target room identifier string token: ";
-            std::cin >> input_room;
+        std::string active_msg = "";
+        {
+            std::lock_guard<std::mutex> lock(input_mutex);
+            if (!shared_input_buffer.empty()) {
+                active_msg = shared_input_buffer;
+                shared_input_buffer.clear();
+            }
         }
 
-        // Save the chosen room token back to disk via SaveConfigToDisk
-        SaveConfigToDisk(input_room, saved_log_level, active_tcp_only);
-        
-        InitializeCalleeSignaling(input_room);
+        if (!active_msg.empty()) {
+            size_t delimiter_pos = active_msg.find(':');
+            if (delimiter_pos != std::string::npos) {
+                std::string target_peer = active_msg.substr(0, delimiter_pos);
+                std::string text_payload = active_msg.substr(delimiter_pos + 1);
+                SendTargetedMessage(active_room_id, global_client_id, target_peer, text_payload);
+            } else {
+                SPDLOG_WARN("Invalid format pattern! Remember to use 'target_id:message'.");
+            }
+        }
     }
 
-    std::cout << "\n>>> USB/IP Server Active. Press Ctrl+C to quit.\n" << std::endl;
+    HandleGracefulExit(active_room_id, global_client_id);
 
-    while (keep_running) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    if (core_server_connection) {
+        core_server_connection->ShutdownConnection();
+        core_server_connection.reset();
+    }
+    {
+        std::lock_guard<std::mutex> lock(clients_mutex);
+        for (auto& pair : connected_clients) {
+            if (pair.second) {
+                pair.second->ShutdownConnection();
+            }
+        }
+        connected_clients.clear();
     }
 
-    peer_connection = nullptr;
-    native_data_channel = nullptr;
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
-  
+    if (input_thread.joinable()) {
+        input_thread.join(); 
+    }
+    
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
 
-    ShutdownFirebaseFramework(nullptr); 
+    ShutdownFirebaseFramework(nullptr);
     return 0;
 }

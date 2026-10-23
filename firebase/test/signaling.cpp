@@ -4,56 +4,38 @@
 #include <sstream>
 #include <cstdio>
 #include <algorithm>
+#include <vector>
+#include <chrono>
+#include <cstdlib>
+#include <ctime>
+#include <future>
 
 #include "firebase/app.h"
 #include "firebase/firestore.h"
 #include "firebase/util.h"
 
 firebase::firestore::Firestore* db = nullptr;
-std::string active_room_id = "";
 std::string active_log_level = "info";
-bool active_tcp_only = false;
+
+using namespace firebase::firestore;
+
+static RoomReadyCallback global_room_ready_callback = nullptr;
+static PeerLeftCallback global_peer_left_callback = nullptr;
+static SdpReceivedCallback global_sdp_received_callback = nullptr;
+static IceReceivedCallback global_ice_received_callback = nullptr;
+
+uint64_t GetCurrentEpochMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
 
 void SetupLogging(const std::string& level_str) {
     std::string level = level_str;
     std::transform(level.begin(), level.end(), level.begin(), ::tolower);
-
-    if (level == "debug") {
-        spdlog::set_level(spdlog::level::debug);
-    } else if (level == "trace") {
-        spdlog::set_level(spdlog::level::trace);
-    } else if (level == "warn") {
-        spdlog::set_level(spdlog::level::warn);
-    } else if (level == "err" || level == "error") {
-        spdlog::set_level(spdlog::level::err);
-    } else if (level == "off") {
-        spdlog::set_level(spdlog::level::off);
-    } else {
-        spdlog::set_level(spdlog::level::info);
-        level = "info";
-    }
-
+    if (level == "debug") spdlog::set_level(spdlog::level::debug);
+    else if (level == "trace") spdlog::set_level(spdlog::level::trace);
+    else spdlog::set_level(spdlog::level::info);
     active_log_level = level;
-    SPDLOG_INFO("Configured spdlog level to: [{}]", active_log_level);
-}
-
-void LogSdpDtlsRoles(const std::string& sdp_text, const std::string& origin) {
-    SPDLOG_INFO("--- [DTLS ROLE ANALYSIS: {}] ---", origin);
-    
-    if (sdp_text.find("a=setup:actpass") != std::string::npos) {
-        SPDLOG_INFO("  |--> DTLS Role Setup: 'actpass' (Flexible - Offerer permits Peer to select DTLS Role)");
-    } else if (sdp_text.find("a=setup:active") != std::string::npos) {
-        SPDLOG_INFO("  |--> DTLS Role Setup: 'active'  ==> Operates as DTLS CLIENT (Initiates Handshake)");
-    } else if (sdp_text.find("a=setup:passive") != std::string::npos) {
-        SPDLOG_INFO("  |--> DTLS Role Setup: 'passive' ==> Operates as DTLS SERVER (Accepts Handshake)");
-    }
-
-    size_t fp_pos = sdp_text.find("a=fingerprint:");
-    if (fp_pos != std::string::npos) {
-        size_t end_pos = sdp_text.find("\r\n", fp_pos);
-        std::string fp_line = sdp_text.substr(fp_pos, end_pos - fp_pos);
-        SPDLOG_INFO("  |--> Security Fingerprint: {}", fp_line);
-    }
 }
 
 bool InitializeFirebaseFramework() {
@@ -62,31 +44,36 @@ bool InitializeFirebaseFramework() {
 #else
     firebase::App* app = firebase::App::Create();
 #endif
-
-    if (!app) {
-        SPDLOG_ERROR("Failed to initialize Firebase App context.");
-        return false;
-    }
-
+    if (!app) return false;
+    
     db = firebase::firestore::Firestore::GetInstance(app);
-    if (!db) {
-        SPDLOG_ERROR("Failed to instantiate Firestore database pointer.");
-        return false;
-    }
+    if (!db) return false;
 
-    firebase::firestore::Settings settings = db->settings();
+    firebase::firestore::Settings settings;
     settings.set_persistence_enabled(false);
+    firebase::SetLogLevel(firebase::kLogLevelError);
     db->set_settings(settings);
-
+    
+    SPDLOG_INFO("[Firestore Engine] High-performance real-time configuration applied successfully.");
     return true;
 }
 
 void ShutdownFirebaseFramework(firebase::App* app) {
-    if (db) { db = nullptr; }
-    if (app) { delete app; }
+    if (db) db = nullptr;
+    if (app) delete app;
 }
 
-bool SaveConfigToDisk(const std::string& room_id, const std::string& log_level, bool tcp_only, const std::string& filename) {
+std::string GenerateRandomRoomId(size_t length) {
+    const std::string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    std::string random_id;
+    random_id.reserve(length);
+    for (size_t i = 0; i < length; ++i) {
+        random_id += chars[std::rand() % chars.length()];
+    }
+    return random_id;
+}
+
+bool SaveConfigToDisk(const std::string& room_id, const std::string& log_level, const std::string& filename) {
     std::ofstream configFile(filename);
     if (!configFile.is_open()) {
         SPDLOG_WARN("Could not open {} for writing.", filename);
@@ -94,15 +81,13 @@ bool SaveConfigToDisk(const std::string& room_id, const std::string& log_level, 
     }
     configFile << "ROOM_ID=" << room_id << "\n";
     configFile << "LOG_LEVEL=" << log_level << "\n";
-    configFile << "TCP_ONLY=" << (tcp_only ? "true" : "false") << "\n";
     return true;
 }
 
-void LoadConfigFromDisk(std::string& out_room_id, std::string& out_log_level, bool& out_tcp_only, const std::string& filename) {
+void LoadConfigFromDisk(std::string& out_room_id, std::string& out_log_level, const std::string& filename) {
     std::ifstream configFile(filename);
     out_room_id.clear();
     out_log_level = "info";
-    out_tcp_only = false;
 
     if (!configFile.is_open()) return;
 
@@ -113,246 +98,325 @@ void LoadConfigFromDisk(std::string& out_room_id, std::string& out_log_level, bo
         if (std::getline(is_line, key, '=')) {
             std::string value;
             if (std::getline(is_line, value)) {
-                if (key == "ROOM_ID") {
-                    out_room_id = value;
-                } else if (key == "LOG_LEVEL") {
-                    out_log_level = value;
-                } else if (key == "TCP_ONLY" || key == "TCPONLY") {
-                    std::string val_lower = value;
-                    std::transform(val_lower.begin(), val_lower.end(), val_lower.begin(), ::tolower);
-                    out_tcp_only = (val_lower == "true" || val_lower == "1");
-                }
+                if (key == "ROOM_ID") out_room_id = value;
+                else if (key == "LOG_LEVEL") out_log_level = value;
             }
         }
     }
 }
 
-void ValidateAndInitializeCaller(const std::string& room_id) {
-    db->Collection("rooms").Document(room_id).Get()
-      .OnCompletion([room_id](const firebase::Future<firebase::firestore::DocumentSnapshot>& future) {
-          if (future.status() == firebase::kFutureStatusComplete && !future.error()) {
-              auto snapshot = future.result();
-              if (snapshot->exists()) {
-                  active_room_id = room_id;
-                  SPDLOG_INFO("Reusing existing room ID: {}. Resetting SDP session...", active_room_id);
-
-                  peer_connection->CreateOffer(
-                      new rtc::RefCountedObject<CallerCreateSessionDescriptionObserver>(), 
-                      webrtc::PeerConnectionInterface::RTCOfferAnswerOptions()
-                  );
-                  return;
-              }
-          }
-          
-          SPDLOG_WARN("Room ID [{}] is invalid or deleted on server. Clearing configuration...", room_id);
-          active_room_id.clear();
-          SaveConfigToDisk("", active_log_level, active_tcp_only);
-
-          SPDLOG_INFO("Fallback: Formulating new room document...");
-          peer_connection->CreateOffer(
-              new rtc::RefCountedObject<CallerCreateSessionDescriptionObserver>(), 
-              webrtc::PeerConnectionInterface::RTCOfferAnswerOptions()
-          );
-      });
-}
-
-void DummySetSessionDescriptionObserver::OnSuccess() {
-    SPDLOG_DEBUG("Applied session description configuration context.");
-}
-
-void DummySetSessionDescriptionObserver::OnFailure(webrtc::RTCError error) {
-    SPDLOG_ERROR("Failed assigning session layer: {}", error.message());
-}
-
-void CallerCreateSessionDescriptionObserver::OnSuccess(webrtc::SessionDescriptionInterface* desc) {
-    peer_connection->SetLocalDescription(DummySetSessionDescriptionObserver::Create(), desc);
-
-    std::string sdp_text;
-    desc->ToString(&sdp_text);
-    
-    LogSdpDtlsRoles(sdp_text, "CALLER LOCAL OFFER");
-
-    firebase::firestore::FieldValue offer_payload = firebase::firestore::FieldValue::Map({
-        {"type", firebase::firestore::FieldValue::String("offer")},
-        {"sdp", firebase::firestore::FieldValue::String(sdp_text)}
-    });
-
-    if (!active_room_id.empty()) {
-        db->Collection("rooms").Document(active_room_id).Set({{"offer", offer_payload}})
-          .OnCompletion([](const firebase::Future<void>& future) {
-              if (future.status() == firebase::kFutureStatusComplete && !future.error()) {
-                  SPDLOG_INFO("Reset offer SDP in existing Room ID: {}", active_room_id);
-                  InitializeCallerSignaling();
-              }
-          });
+void SetUserPresence(const std::string& room_id, const std::string& my_client_id, bool is_online) {
+    if (!db) return;
+    DocumentReference user_doc = db->Collection("rooms").Document(room_id).Collection("users").Document(my_client_id);
+    if (is_online) {
+        user_doc.Set({{"status", FieldValue::String("online")}, {"lastSeen", FieldValue::Integer(GetCurrentEpochMs())}});
     } else {
-        db->Collection("rooms").Add({{"offer", offer_payload}})
-          .OnCompletion([](const firebase::Future<firebase::firestore::DocumentReference>& future) {
-              if (future.status() == firebase::kFutureStatusComplete && !future.error()) {
-                  active_room_id = future.result()->id();
-                  SaveConfigToDisk(active_room_id, active_log_level, active_tcp_only);
-
-                  SPDLOG_INFO("Room created in Firebase! Room ID: {}", active_room_id);
-                  InitializeCallerSignaling();
-              }
-          });
+        user_doc.Delete();
     }
 }
 
-void CallerCreateSessionDescriptionObserver::OnFailure(webrtc::RTCError error) {
-    SPDLOG_ERROR("Failed to formulate offer payload description.");
+void DeleteCollectionRecursively(const CollectionReference& collection_ref) {
+    collection_ref.Get().OnCompletion([collection_ref](const firebase::Future<QuerySnapshot>& future) {
+        if (future.status() == firebase::kFutureStatusComplete && !future.error()) {
+            auto snapshot = future.result();
+            for (const auto& doc_snap : snapshot->documents()) {
+                DocumentReference doc_ref = doc_snap.reference();
+                doc_ref.Delete();
+            }
+        }
+    });
 }
 
-void InitializeCallerSignaling() {
-    db->Collection("rooms").Document(active_room_id)
-      .AddSnapshotListener([](const firebase::firestore::DocumentSnapshot& snapshot, firebase::firestore::Error err, const std::string& error_msg) {
-          if (err != firebase::firestore::kErrorOk || !snapshot.exists()) return;
-          
-          auto data = snapshot.GetData();
-          if (data.find("answer") != data.end() && !peer_connection->remote_description()) {
-              auto answer_map = data["answer"].map_value();
-              std::string sdp = answer_map["sdp"].string_value();
-              
-              SPDLOG_INFO("Received Callee SDP Answer from Firestore.");
-              LogSdpDtlsRoles(sdp, "CALLER RECEIVED REMOTE ANSWER");
+//bool VerifyAndReserveRoomCapacity(const std::string& room_id) {
+//    if (!db) return false;
+//    auto active_users_promise = std::make_shared<std::promise<size_t>>();
+//    std::future<size_t> active_users_future = active_users_promise->get_future();
+//
+//    CollectionReference users_ref = db->Collection("rooms").Document(room_id).Collection("users");
+//    users_ref.Get().OnCompletion([active_users_promise](const firebase::Future<QuerySnapshot>& future) {
+//        if (future.status() == firebase::kFutureStatusComplete && !future.error()) {
+//            active_users_promise->set_value(future.result()->documents().size());
+//        } else {
+//            active_users_promise->set_value(0);
+//        }
+//    });
+//
+//    active_users_future.wait();
+//    size_t current_occupancy = active_users_future.get();
+//    return current_occupancy < 2;
+//}
 
-              webrtc::SdpParseError parse_err;
-              std::unique_ptr<webrtc::SessionDescriptionInterface> remote_desc = 
-                  webrtc::CreateSessionDescription(webrtc::SdpType::kAnswer, sdp, &parse_err);
-              
-              if (remote_desc) {
-                  peer_connection->SetRemoteDescription(DummySetSessionDescriptionObserver::Create(), remote_desc.release());
-              } else {
-                  SPDLOG_ERROR("SDP Parsing Failed: {}", parse_err.description);
-              }
-          }
-      });
+bool VerifyAndReserveRoomCapacity(const std::string& room_id) {
+    if (!db) return false;
+    auto active_users_promise = std::make_shared<std::promise<size_t>>();
+    std::future<size_t> active_users_future = active_users_promise->get_future();
 
-    db->Collection("rooms").Document(active_room_id).Collection("calleeCandidates")
-      .AddSnapshotListener([](const firebase::firestore::QuerySnapshot& snapshot, firebase::firestore::Error err, const std::string& error_msg) {
-          if (err != firebase::firestore::kErrorOk) return;
-          
-          for (const auto& change : snapshot.DocumentChanges()) {
-              if (change.type() == firebase::firestore::DocumentChange::Type::kAdded) {
-                  auto data = change.document().GetData();
-                  std::string cand = data["candidate"].string_value();
-                  std::string mid = data["sdpMid"].string_value();
-                  int index = static_cast<int>(data["sdpMLineIndex"].integer_value());
+    CollectionReference users_ref = db->Collection("rooms").Document(room_id).Collection("users");
+    uint64_t current_time = GetCurrentEpochMs();
 
-                  SPDLOG_INFO("[REMOTE CANDIDATE RECEIVED - CALLEE]");
-                  SPDLOG_INFO("  |--> sdpMid:        {}", mid);
-                  SPDLOG_INFO("  |--> sdpMLineIndex: {}", index);
-                  SPDLOG_INFO("  |--> Candidate SDP: {}", cand);
+    users_ref.Get().OnCompletion([active_users_promise, current_time](const firebase::Future<QuerySnapshot>& future) {
+        if (future.status() == firebase::kFutureStatusComplete && !future.error()) {
+            size_t active_count = 0;
+            for (const auto& doc : future.result()->documents()) {
+                MapFieldValue data = doc.GetData();
+                bool is_stale = true;
+                
+                if (data.find("lastSeen") != data.end()) {
+                    uint64_t last_seen = data["lastSeen"].integer_value();
+                    
+                    // Use absolute difference to safely handle minor system clock drift/skew
+                    int64_t diff = static_cast<int64_t>(current_time) - static_cast<int64_t>(last_seen);
+                    if (std::abs(diff) < 30000) { // 30 seconds threshold
+                        is_stale = false;
+                    }
+                }
 
-                  if (active_tcp_only && cand.find(" udp ") != std::string::npos) {
-                      SPDLOG_WARN("TCP_ONLY active: Dropped incoming UDP ICE candidate.");
-                      continue;
-                  }
-                  
-                  webrtc::SdpParseError parse_err;
-                  std::unique_ptr<webrtc::IceCandidateInterface> native_cand(
-                      webrtc::CreateIceCandidate(mid, index, cand, &parse_err));
-                      
-                  if (native_cand) {
-                      peer_connection->AddIceCandidate(native_cand.get());
-                      SPDLOG_INFO("Successfully added remote ICE candidate to Caller PeerConnection.");
-                  } else {
-                      SPDLOG_ERROR("Failed to parse caller candidate: {}", parse_err.description);
-                  }
-              }
-          }
-      });
-}
-
-void CalleeCreateSessionDescriptionObserver::OnSuccess(webrtc::SessionDescriptionInterface* desc) {
-    peer_connection->SetLocalDescription(DummySetSessionDescriptionObserver::Create(), desc);
-
-    std::string sdp_text;
-    desc->ToString(&sdp_text);
-    
-    LogSdpDtlsRoles(sdp_text, "CALLEE LOCAL ANSWER");
-
-    firebase::firestore::FieldValue answer_payload = firebase::firestore::FieldValue::Map({
-        {"type", firebase::firestore::FieldValue::String("answer")},
-        {"sdp", firebase::firestore::FieldValue::String(sdp_text)}
+                if (is_stale) {
+                    SPDLOG_WARN("[Room Capacity] Purging stale client document: {}", doc.id());
+                    doc.reference().Delete();
+                } else {
+                    active_count++;
+                }
+            }
+            active_users_promise->set_value(active_count);
+        } else {
+            active_users_promise->set_value(0);
+        }
     });
 
-    db->Collection("rooms").Document(active_room_id).Update({{"answer", answer_payload}});
-    SPDLOG_INFO("Dispatched answer mapping. Building P2P path...");
+    active_users_future.wait();
+    size_t current_occupancy = active_users_future.get();
+    return current_occupancy < 2;
 }
 
-void CalleeCreateSessionDescriptionObserver::OnFailure(webrtc::RTCError error) {
-    SPDLOG_ERROR("Failed to formulate callee answer description.");
+void RegisterOnRoomReadyEvent(RoomReadyCallback callback) { global_room_ready_callback = callback; }
+void RegisterOnPeerLeftEvent(PeerLeftCallback callback) { global_peer_left_callback = callback; }
+void RegisterOnSdpReceivedEvent(SdpReceivedCallback callback) { global_sdp_received_callback = callback; }
+void RegisterOnIceReceivedEvent(IceReceivedCallback callback) { global_ice_received_callback = callback; }
+
+void HandleGracefulExit(const std::string& room_id, const std::string& my_client_id) {
+    if (!db) return;
+    SPDLOG_INFO("Cleaning up Firestore presence nodes for client {}...", my_client_id);
+    
+    SendTargetedMessage(room_id, my_client_id, "ALL", "SYSTEM_EVENT: Goodbye! I have closed my connection.");
+    SetUserPresence(room_id, my_client_id, false);
+    
+    DocumentReference room_doc = db->Collection("rooms").Document(room_id);
+    CollectionReference users_ref = room_doc.Collection("users");
+    CollectionReference messages_ref = room_doc.Collection("messages");
+
+    users_ref.Get().OnCompletion([room_id, room_doc, users_ref, messages_ref](const firebase::Future<QuerySnapshot>& future) mutable {
+        if (future.status() == firebase::kFutureStatusComplete && !future.error()) {
+            auto snapshot = future.result();
+            size_t remaining_users = snapshot->documents().size();
+            
+            SPDLOG_INFO("[Room Watchdog] Remaining active peers in room: {}", remaining_users);
+            
+            if (remaining_users == 0) {
+                SPDLOG_WARN("[Room Watchdog] Last user left. Purging room database trace completely...");
+                DeleteCollectionRecursively(messages_ref);
+                DeleteCollectionRecursively(users_ref);
+                room_doc.Delete();
+            }
+        }
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 }
 
-void InitializeCalleeSignaling(const std::string& room_id) {
-    active_room_id = room_id;
-    SPDLOG_INFO("Fetching Room Profile parameters: {}", active_room_id);
+void ListenForTargetedMessages(const std::string& room_id, const std::string& my_client_id) {
+    if (!db) return;
+    uint64_t app_boot_time = GetCurrentEpochMs();
 
-    db->Collection("rooms").Document(active_room_id).Get()
-      .OnCompletion([](const firebase::Future<firebase::firestore::DocumentSnapshot>& future) {
-          if (future.status() != firebase::kFutureStatusComplete || future.error()) return;
-          
-          auto snapshot = future.result();
-          if (!snapshot->exists()) {
-              SPDLOG_ERROR("Target room ID '{}' does not exist or was deleted on Firebase!", active_room_id);
-              active_room_id.clear();
-              return;
-          }
+    CollectionReference messages_ref = db->Collection("rooms").Document(room_id).Collection("messages");
+    CollectionReference users_ref = db->Collection("rooms").Document(room_id).Collection("users");
 
-          auto data = snapshot->GetData();
-          auto offer_map = data["offer"].map_value();
-          std::string sdp = offer_map["sdp"].string_value();
+    std::vector<FieldValue> allowed_targets = { FieldValue::String("ALL"), FieldValue::String(my_client_id) };
 
-          SPDLOG_INFO("Callee fetched host SDP offer successfully.");
-          LogSdpDtlsRoles(sdp, "CALLEE RECEIVED REMOTE OFFER");
+    Query targeted_query = messages_ref
+        .WhereIn("targetId", allowed_targets)
+        .WhereGreaterThan("timestamp", FieldValue::Integer(app_boot_time));
 
-          webrtc::SdpParseError parse_err;
-          std::unique_ptr<webrtc::SessionDescriptionInterface> remote_offer = 
-              webrtc::CreateSessionDescription(webrtc::SdpType::kOffer, sdp, &parse_err);
-          
-          if (remote_offer) {
-              peer_connection->SetRemoteDescription(DummySetSessionDescriptionObserver::Create(), remote_offer.release());
+    users_ref.AddSnapshotListener([room_id, my_client_id](const QuerySnapshot& snapshot, Error error, const std::string& error_msg) {
+        if (error != kErrorOk) return;
+        for (const auto& change : snapshot.DocumentChanges()) {
+            std::string user_id = change.document().id();
+            if (user_id == my_client_id) continue;
+            
+            if (change.type() == DocumentChange::Type::kAdded) {
+                SPDLOG_INFO("[ROOM PRESENCE] Peer entered room active pool: {}", user_id);
+            } else if (change.type() == DocumentChange::Type::kRemoved) {
+                SPDLOG_INFO("[ROOM PRESENCE] Peer left room active pool: {}", user_id);
+                if (global_peer_left_callback) global_peer_left_callback(user_id);
+            }
+        }
+    });
 
-              db->Collection("rooms").Document(active_room_id).Collection("callerCandidates")
-                .AddSnapshotListener([](const firebase::firestore::QuerySnapshot& q_snapshot, firebase::firestore::Error err, const std::string& error_msg) {
-                    if (err != firebase::firestore::kErrorOk) return;
-                    
-                    for (const auto& change : q_snapshot.DocumentChanges()) {
-                        if (change.type() == firebase::firestore::DocumentChange::Type::kAdded) {
-                            auto d = change.document().GetData();
-                            std::string cand = d["candidate"].string_value();
-                            std::string mid = d["sdpMid"].string_value();
-                            int idx = static_cast<int>(d["sdpMLineIndex"].integer_value());
+    targeted_query.AddSnapshotListener([room_id, my_client_id](const QuerySnapshot& snapshot, Error error, const std::string& error_msg) {
+        if (error != kErrorOk) {
+            SPDLOG_ERROR("Snapshot listener broken down: {}", error_msg);
+            return;
+        }
+        for (const auto& change : snapshot.DocumentChanges()) {
+            if (change.type() == DocumentChange::Type::kAdded) {
+                MapFieldValue data = change.document().GetData();
+                std::string sender_id = data["senderId"].string_value();
+                std::string target_id = data["targetId"].string_value();
+                std::string text_body = data["text"].string_value();
+                
+                // Log the identifiers right here
+                SPDLOG_INFO("[Message Received] sender_id: [{}], target_id: [{}], my_client_id: [{}]", 
+                            sender_id, target_id, my_client_id);
 
-                            SPDLOG_INFO("[REMOTE CANDIDATE RECEIVED - CALLER]");
-                            SPDLOG_INFO("  |--> sdpMid:        {}", mid);
-                            SPDLOG_INFO("  |--> sdpMLineIndex: {}", idx);
-                            SPDLOG_INFO("  |--> Candidate SDP: {}", cand);
+                if (sender_id == my_client_id) continue;
 
-                            if (active_tcp_only && cand.find(" udp ") != std::string::npos) {
-                                SPDLOG_WARN("TCP_ONLY active: Dropped incoming UDP ICE candidate.");
-                                continue;
-                            }
-                            
-                            webrtc::SdpParseError c_parse_err;
-                            std::unique_ptr<webrtc::IceCandidateInterface> native_cand(
-                                webrtc::CreateIceCandidate(mid, idx, cand, &c_parse_err));
-                                
-                            if (native_cand) {
-                                peer_connection->AddIceCandidate(native_cand.get());
-                                SPDLOG_INFO("Successfully added remote ICE candidate to Callee PeerConnection.");
-                            } else {
-                                SPDLOG_ERROR("Failed to parse callee candidate: {}", c_parse_err.description);
-                            }
-                        }
+                if (text_body == "SYSTEM_EVENT: ROOM_FULL_READY_FOR_WEBRTC") {
+                    if (global_room_ready_callback) global_room_ready_callback(room_id);
+                    continue;
+                }
+                if (text_body == "SYSTEM_EVENT: Goodbye! I have closed my connection.") {
+                    if (global_peer_left_callback) global_peer_left_callback(sender_id);
+                    continue;
+                }
+                if (text_body.rfind("SDP_OFFER:", 0) == 0) {
+                    if (global_sdp_received_callback) global_sdp_received_callback(sender_id, "offer", text_body.substr(10));
+                    continue;
+                }
+                if (text_body.rfind("SDP_ANSWER:", 0) == 0) {
+                    if (global_sdp_received_callback) global_sdp_received_callback(sender_id, "answer", text_body.substr(11));
+                    continue;
+                }
+                if (text_body.rfind("ICE:", 0) == 0) {
+                    if (global_ice_received_callback) {
+                        std::stringstream ss(text_body.substr(4));
+                        std::string mid, index_str, candidate_sdp;
+                        std::getline(ss, mid, ':');
+                        std::getline(ss, index_str, ':');
+                        std::getline(ss, candidate_sdp);
+                        global_ice_received_callback(sender_id, mid, std::stoi(index_str), candidate_sdp);
                     }
-                });
+                    continue;
+                }
+            }
+        }
+    });
 
-              peer_connection->CreateAnswer(
-                  new rtc::RefCountedObject<CalleeCreateSessionDescriptionObserver>(), webrtc::PeerConnectionInterface::RTCOfferAnswerOptions());
-          } else {
-              SPDLOG_ERROR("SDP Parsing Failed: {}", parse_err.description);
-          }
-      });
+//    // Ensure BOTH peers reliably fire room ready when occupancy hits 2
+//    users_ref.Get().OnCompletion([room_id, my_client_id](const firebase::Future<QuerySnapshot>& future) {
+//        if (future.status() == firebase::kFutureStatusComplete && !future.error()) {
+//            size_t occupancy = future.result()->documents().size();
+//            if (occupancy == 2) {
+//                SendTargetedMessage(room_id, my_client_id, "ALL", "SYSTEM_EVENT: ROOM_FULL_READY_FOR_WEBRTC");
+//                if (global_room_ready_callback) {
+//                    global_room_ready_callback(room_id);
+//                }
+//            }
+//        }
+//    });
+
+    // Change this block at the end of ListenForTargetedMessages in signaling.cpp
+    users_ref.Get().OnCompletion([room_id, my_client_id](const firebase::Future<QuerySnapshot>& future) {
+        if (future.status() == firebase::kFutureStatusComplete && !future.error()) {
+            size_t occupancy = future.result()->documents().size();
+            if (occupancy == 2) {
+                SendTargetedMessage(room_id, my_client_id, "ALL", "SYSTEM_EVENT: ROOM_FULL_READY_FOR_WEBRTC");
+                if (global_room_ready_callback) {
+                    global_room_ready_callback(room_id);
+                }
+            }
+        }
+    });
+
+
+
+
+/*
+    // Change this block at the end of ListenForTargetedMessages in signaling.cpp
+    users_ref.Get().OnCompletion([room_id, my_client_id](const firebase::Future<QuerySnapshot>& future) {
+        if (future.status() == firebase::kFutureStatusComplete && !future.error()) {
+            auto snapshot = future.result();
+            size_t occupancy = snapshot->documents().size();
+
+            // Count how many unique clients are NOT me
+            bool has_remote_peer = false;
+            for (const auto& doc_snap : snapshot->documents()) {
+                if (doc_snap.id() != my_client_id) {
+                    has_remote_peer = true;
+                    break;
+                }
+            }
+
+            // CRITICAL FIX: Only fire if occupancy is >= 2 AND a remote peer actually exists
+            if (occupancy >= 2 && has_remote_peer) {
+                SendTargetedMessage(room_id, my_client_id, "ALL", "SYSTEM_EVENT: ROOM_FULL_READY_FOR_WEBRTC");
+                if (global_room_ready_callback) {
+                    global_room_ready_callback(room_id);
+                }
+            } else {
+                SPDLOG_INFO("[Room Monitoring] Waiting for remote clients... Current total users: {}", occupancy);
+            }
+        }
+    });
+*/
+    
+}
+
+void SendTargetedMessage(const std::string& room_id, const std::string& my_client_id, 
+                          const std::string& target_client_id, const std::string& text_payload) {
+    if (!db) return;
+    CollectionReference messages_ref = db->Collection("rooms").Document(room_id).Collection("messages");
+
+    MapFieldValue msg_map = {
+        {"senderId",  FieldValue::String(my_client_id)},
+        {"targetId",  FieldValue::String(target_client_id)},
+        {"text",      FieldValue::String(text_payload)},
+        {"timestamp", FieldValue::Integer(GetCurrentEpochMs())}
+    };
+    messages_ref.Add(msg_map);
+}
+
+
+
+int GetActiveClientCount(const std::string& room_id) {
+    if (!db) return 0;
+    
+    auto active_users_promise = std::make_shared<std::promise<size_t>>();
+    std::future<size_t> active_users_future = active_users_promise->get_future();
+
+    CollectionReference users_ref = db->Collection("rooms").Document(room_id).Collection("users");
+    uint64_t current_time = GetCurrentEpochMs();
+
+    users_ref.Get().OnCompletion([active_users_promise, current_time](const firebase::Future<QuerySnapshot>& future) {
+        if (future.status() == firebase::kFutureStatusComplete && !future.error()) {
+            size_t active_count = 0;
+            for (const auto& doc : future.result()->documents()) {
+                MapFieldValue data = doc.GetData();
+                bool is_stale = true;
+                
+                if (data.find("lastSeen") != data.end()) {
+                    uint64_t last_seen = data["lastSeen"].integer_value();
+                    int64_t diff = static_cast<int64_t>(current_time) - static_cast<int64_t>(last_seen);
+                    if (std::abs(diff) < 30000) { // 30 seconds threshold
+                        is_stale = false;
+                    }
+                }
+
+                if (!is_stale) {
+                    active_count++;
+                }
+            }
+            active_users_promise->set_value(active_count);
+        } else {
+            active_users_promise->set_value(0);
+        }
+    });
+
+    active_users_future.wait();
+    return static_cast<int>(active_users_future.get());
+}
+
+bool IsRoomEmpty(const std::string& room_id) {
+    int count = GetActiveClientCount(room_id);
+    SPDLOG_INFO("[Room Check] Room [{}] current active client count: {}", room_id, count);
+    return (count == 0);
 }
