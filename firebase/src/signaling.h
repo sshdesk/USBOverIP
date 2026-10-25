@@ -8,10 +8,8 @@
 #include <string>
 #include <fstream>
 #include <cstdio>
+#include <functional>
 #include <spdlog/spdlog.h>
-
-#include "api/peer_connection_interface.h"
-#include "api/data_channel_interface.h"
 
 namespace firebase {
     class App;
@@ -20,47 +18,45 @@ namespace firebase {
     }
 }
 
+// Global shared configuration tokens
 extern firebase::firestore::Firestore* db;
 extern std::string active_room_id;
 extern std::string active_log_level;
-extern bool active_tcp_only;
-extern rtc::scoped_refptr<webrtc::PeerConnectionInterface> peer_connection;
-extern rtc::scoped_refptr<webrtc::DataChannelInterface> native_data_channel;
-extern webrtc::DataChannelObserver* global_dc_observer;
 
-// Firebase initialization
+// Callback type definitions for decoupled abstraction boundaries
+typedef std::function<void(const std::string& room_id)> RoomReadyCallback;
+typedef std::function<void(const std::string& peer_client_id)> PeerLeftCallback;
+typedef std::function<void(const std::string& sender_id, const std::string& type, const std::string& sdp)> SdpReceivedCallback;
+typedef std::function<void(const std::string& sender_id, const std::string& mid, int mline_index, const std::string& sdp)> IceReceivedCallback;
+
+// Baseline Framework Setup Engine
 bool InitializeFirebaseFramework();
 void ShutdownFirebaseFramework(firebase::App* app);
-void InitializeCallerSignaling();
-void InitializeCalleeSignaling(const std::string& room_id);
-
-// Persistence & validation helpers
 void SetupLogging(const std::string& level_str);
-bool SaveConfigToDisk(const std::string& room_id, const std::string& log_level = "info", bool tcp_only = false, const std::string& filename = "config.txt");
-void LoadConfigFromDisk(std::string& out_room_id, std::string& out_log_level, bool& out_tcp_only, const std::string& filename = "config.txt");
-void ValidateAndInitializeCaller(const std::string& room_id);
-void LogSdpDtlsRoles(const std::string& sdp_text, const std::string& origin);
 
-// WebRTC Observers
-class DummySetSessionDescriptionObserver : public webrtc::SetSessionDescriptionObserver {
-public:
-    static DummySetSessionDescriptionObserver* Create() {
-        return new rtc::RefCountedObject<DummySetSessionDescriptionObserver>();
-    }
-    void OnSuccess() override;
-    void OnFailure(webrtc::RTCError error) override;
-};
+// Config and Identity helpers
+std::string GenerateRandomRoomId(size_t length = 20);
+bool SaveConfigToDisk(const std::string& room_id, const std::string& log_level = "info", const std::string& filename = "config.txt");
+void LoadConfigFromDisk(std::string& out_room_id, std::string& out_log_level, const std::string& filename = "config.txt");
 
-class CallerCreateSessionDescriptionObserver : public webrtc::CreateSessionDescriptionObserver {
-public:
-    void OnSuccess(webrtc::SessionDescriptionInterface* desc) override;
-    void OnFailure(webrtc::RTCError error) override;
-};
+// Presence & Automated Purge Cleanups
+void SetUserPresence(const std::string& room_id, const std::string& my_client_id, bool is_online);
+void HandleGracefulExit(const std::string& room_id, const std::string& my_client_id);
+bool VerifyAndReserveRoomCapacity(const std::string& room_id);
 
-class CalleeCreateSessionDescriptionObserver : public webrtc::CreateSessionDescriptionObserver {
-public:
-    void OnSuccess(webrtc::SessionDescriptionInterface* desc) override;
-    void OnFailure(webrtc::RTCError error) override;
-};
+// Event Registration Interface
+void RegisterOnRoomReadyEvent(RoomReadyCallback callback);
+void RegisterOnPeerLeftEvent(PeerLeftCallback callback);
+void RegisterOnSdpReceivedEvent(SdpReceivedCallback callback);
+void RegisterOnIceReceivedEvent(IceReceivedCallback callback);
+
+// Messaging routing pipeline
+void ListenForTargetedMessages(const std::string& room_id, const std::string& my_client_id);
+void SendTargetedMessage(const std::string& room_id, const std::string& my_client_id, 
+                          const std::string& target_client_id, const std::string& text_payload);
+
+// Existing declarations...
+int GetActiveClientCount(const std::string& room_id);
+bool IsRoomEmpty(const std::string& room_id);
 
 #endif // SIGNALING_H

@@ -68,7 +68,8 @@ target_link_libraries(gui_usbip PRIVATE
 
 
 add_executable(usbipd 
-    main.cpp 
+    main.cpp
+    webrtc_usbipd.cpp
     signaling.cpp
     webrtc_stats.cpp
     vbox_service_manager.cpp
@@ -140,9 +141,10 @@ endif()
 add_subdirectory(usbip)
 
 add_executable(usbip-win2 
-    mainusbip.cpp
+    main_usbip.cpp
     signaling.cpp
     tcptunnel.cpp
+    webrtc_usbip.cpp
     webrtc_stats.cpp
     usbip/userspace/usbip/usbip.rc
 )
