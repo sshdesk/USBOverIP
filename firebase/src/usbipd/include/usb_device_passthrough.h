@@ -4,7 +4,9 @@
 #include "usb_device.h"
 #include <windows.h>
 #include <stdbool.h>
-
+#include <cstdio>
+#include <string>
+#include <vector>
 /*
  * Real Windows USB/IP passthrough using the VBoxUSB/VBoxUSBMon host-side
  * driver stack used by usbipd-win. The caller must run elevated and the
@@ -26,8 +28,8 @@ typedef struct {
 /* Enumerate physical USB devices without capturing them. Returns the number
  * of records written (up to capacity). Devices without a derivable BUSID are
  * omitted because USB/IP IMPORT selects devices by BUSID. */
-int usb_device_enumerate_physical_devices(usb_physical_device_info_t *out,
-                                          int capacity);
-void usb_device_list_physical_devices(void);
+int usb_device_enumerate_physical_devices(usb_physical_device_info_t *out, int capacity);
+
+std::vector<std::string> usb_device_list_physical_devices(void);
 
 #endif

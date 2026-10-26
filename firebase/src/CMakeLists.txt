@@ -51,15 +51,47 @@ find_package(SDL2 REQUIRED CONFIG)
 find_package(SDL2_ttf REQUIRED CONFIG)
 
 
-add_executable(gui_usbip WIN32 gui/gui_usbip.cpp)
+add_executable(gui_usbip WIN32 gui/gui.cpp gui/main.cpp
+    webrtc_usbipd.cpp
+    signaling.cpp
+    webrtc_stats.cpp
+    vbox_service_manager.cpp
+
+    # USBIPD Source Files
+    usbipd/src/usb_device_hid.cpp  
+    usbipd/src/usb_device_passthrough.cpp  
+    usbipd/src/usbip_server.cpp  
+
+)
+
+target_include_directories(gui_usbip PRIVATE
+    usbipd/include   ./gui_usbip
+)
 
 
+if(WIN32)
+    target_compile_definitions(gui_usbip PRIVATE WEBRTC_WIN NOMINMAX WIN32_LEAN_AND_MEAN)
+    
+    # Suppress the noisy LNK4099 warnings regarding missing internal libcurl PDB files
+    target_link_options(gui_usbip PRIVATE "/IGNORE:4099")
+else()
+    target_compile_definitions(gui_usbip PRIVATE WEBRTC_POSIX)
+endif()
 
 target_link_libraries(gui_usbip PRIVATE 
     google-webrtc::google-webrtc 
     openssl::openssl 
     Opus::opus 
     spdlog::spdlog 
+
+    firebase_firestore
+    firebase_database
+    firebase_auth
+    firebase_app
+        
+    ws2_32 winmm secur32 crypt32 iphlpapi shlwapi user32 gdi32
+
+        
     ZLIB::ZLIB 
     SDL2::SDL2
     SDL2::SDL2main
@@ -68,7 +100,7 @@ target_link_libraries(gui_usbip PRIVATE
 
 
 add_executable(usbipd 
-    main.cpp
+    main_usbipd.cpp
     webrtc_usbipd.cpp
     signaling.cpp
     webrtc_stats.cpp

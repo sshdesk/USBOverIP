@@ -1485,62 +1485,110 @@ int usb_device_enumerate_physical_devices(usb_physical_device_info_t *out, int c
     return count;
 }
 
-void usb_device_list_physical_devices(void) {
-    printf("======================================================================\n");
-    printf("  Connected USB Devices (VID/PID)\n");
-    printf("======================================================================\n");
+
+
+#include <vector>
+#include <string>
+#include <cstdio>
+#include <cstring>
+
+std::vector<std::string> usb_device_list_physical_devices(void) {
+  std::vector<std::string> device_list;
+
+  printf("====================================================================="
+         "=\n");
+  printf("  Connected USB Devices (VID/PID)\n");
+  printf("====================================================================="
+         "=\n");
 #ifdef _WIN32
-    HDEVINFO set = SetupDiGetClassDevsW(&GUID_DEVINTERFACE_USB_DEVICE_LOCAL, NULL, NULL,
-                                        DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
-    if (set == INVALID_HANDLE_VALUE) {
-        print_winerr("SetupDiGetClassDevs");
-        return;
+  HDEVINFO set =
+      SetupDiGetClassDevsW(&GUID_DEVINTERFACE_USB_DEVICE_LOCAL, NULL, NULL,
+                           DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+  if (set == INVALID_HANDLE_VALUE) {
+    print_winerr("SetupDiGetClassDevs");
+    return device_list;
+  }
+  int count = 0;
+  for (DWORD i = 0;; ++i) {
+    SP_DEVICE_INTERFACE_DATA if_data;
+    memset(&if_data, 0, sizeof(if_data));
+    if_data.cbSize = sizeof(if_data);
+    if (!SetupDiEnumDeviceInterfaces(
+            set, NULL, &GUID_DEVINTERFACE_USB_DEVICE_LOCAL, i, &if_data)) {
+      if (GetLastError() == ERROR_NO_MORE_ITEMS)
+        break;
+      continue;
     }
-    int count = 0;
-    for (DWORD i = 0;; ++i) {
-        SP_DEVICE_INTERFACE_DATA if_data;
-        memset(&if_data, 0, sizeof(if_data));
-        if_data.cbSize = sizeof(if_data);
-        if (!SetupDiEnumDeviceInterfaces(set, NULL, &GUID_DEVINTERFACE_USB_DEVICE_LOCAL, i, &if_data)) {
-            if (GetLastError() == ERROR_NO_MORE_ITEMS) break;
-            continue;
-        }
-        DWORD needed = 0;
-        SP_DEVINFO_DATA data;
-        memset(&data, 0, sizeof(data));
-        data.cbSize = sizeof(data);
-        SetupDiGetDeviceInterfaceDetailW(set, &if_data, NULL, 0, &needed, &data);
-        if (!needed) continue;
-        PSP_DEVICE_INTERFACE_DETAIL_DATA_W detail =
-            (PSP_DEVICE_INTERFACE_DETAIL_DATA_W)calloc(1, needed);
-        if (!detail) continue;
-        detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
-        if (!SetupDiGetDeviceInterfaceDetailW(set, &if_data, detail, needed, NULL, &data)) {
-            free(detail); continue;
-        }
-        char hwid[1024] = {0}, location[512] = {0}, instance[512] = {0}, service[128] = {0};
-        get_dev_property_string(set, &data, SPDRP_HARDWAREID, hwid, sizeof(hwid));
-        get_dev_property_string(set, &data, SPDRP_LOCATION_INFORMATION, location, sizeof(location));
-        get_dev_property_string(set, &data, SPDRP_SERVICE, service, sizeof(service));
-        get_instance_id(set, &data, instance, sizeof(instance));
-        unsigned int v=0,p=0;
-        char *vp = strstr(hwid, "VID_");
-        char *pp = strstr(hwid, "PID_");
-        if (vp && pp && sscanf(vp+4, "%4x", &v) == 1 && sscanf(pp+4, "%4x", &p) == 1) {
-            ++count;
-            uint32_t bus = 0, port = 0;
-            bool have_busid = location_get_bus_port(location, &bus, &port);
-            printf("  %02d  %04X:%04X  service=%s  location=%s\n",
-                   count, v, p, service[0] ? service : "(none)",
-                   location[0] ? location : "(unknown)");
-            if (have_busid) printf("      BUSID: %lu-%lu\n", (unsigned long)bus, (unsigned long)port);
-            else printf("      BUSID: (not derivable from LocationInfo)\n");
-            printf("      instance: %s\n", instance);
-        }
-        free(detail);
+    DWORD needed = 0;
+    SP_DEVINFO_DATA data;
+    memset(&data, 0, sizeof(data));
+    data.cbSize = sizeof(data);
+    SetupDiGetDeviceInterfaceDetailW(set, &if_data, NULL, 0, &needed, &data);
+    if (!needed)
+      continue;
+    PSP_DEVICE_INTERFACE_DETAIL_DATA_W detail =
+        (PSP_DEVICE_INTERFACE_DETAIL_DATA_W)calloc(1, needed);
+    if (!detail)
+      continue;
+    detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
+    if (!SetupDiGetDeviceInterfaceDetailW(set, &if_data, detail, needed, NULL,
+                                          &data)) {
+      free(detail);
+      continue;
     }
-    SetupDiDestroyDeviceInfoList(set);
-    if (!count) printf("  No USB devices found.\n");
+    char hwid[1024] = {0}, location[512] = {0}, instance[512] = {0},
+         service[128] = {0};
+    get_dev_property_string(set, &data, SPDRP_HARDWAREID, hwid, sizeof(hwid));
+    get_dev_property_string(set, &data, SPDRP_LOCATION_INFORMATION, location,
+                            sizeof(location));
+    get_dev_property_string(set, &data, SPDRP_SERVICE, service,
+                            sizeof(service));
+    get_instance_id(set, &data, instance, sizeof(instance));
+    unsigned int v = 0, p = 0;
+    char *vp = strstr(hwid, "VID_");
+    char *pp = strstr(hwid, "PID_");
+    if (vp && pp && sscanf(vp + 4, "%4x", &v) == 1 &&
+        sscanf(pp + 4, "%4x", &p) == 1) {
+      ++count;
+      uint32_t bus = 0, port = 0;
+      bool have_busid = location_get_bus_port(location, &bus, &port);
+
+      // All original console printf statements kept completely intact
+      printf("  %02d  %04X:%04X  service=%s  location=%s\n", count, v, p,
+             service[0] ? service : "(none)",
+             location[0] ? location : "(unknown)");
+      if (have_busid)
+        printf("      BUSID: %lu-%lu\n", (unsigned long)bus,
+               (unsigned long)port);
+      else
+        printf("      BUSID: (not derivable from LocationInfo)\n");
+      printf("      instance: %s\n", instance);
+
+      // Populate std::vector<std::string> with VID, PID, and Service / Device
+      // Type
+      char buf[512];
+      const char *service_str = service[0] ? service : "Unknown/Generic";
+
+      if (have_busid) {
+        snprintf(buf, sizeof(buf),
+                 "[%02d] VID:%04X PID:%04X - Type: %s (BUSID: %lu-%lu)", count,
+                 v, p, service_str, (unsigned long)bus, (unsigned long)port);
+      } else {
+        snprintf(buf, sizeof(buf), "[%02d] VID:%04X PID:%04X - Type: %s", count,
+                 v, p, service_str);
+      }
+
+      device_list.push_back(std::string(buf));
+    }
+    free(detail);
+  }
+  SetupDiDestroyDeviceInfoList(set);
+  if (!count) {
+    printf("  No USB devices found.\n");
+    device_list.push_back("No USB devices found.");
+  }
 #endif
-    printf("======================================================================\n");
+  printf("====================================================================="
+         "=\n");
+  return device_list;
 }

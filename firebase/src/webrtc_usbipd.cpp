@@ -266,9 +266,9 @@ void WebRtcManager_usbipd::InternalDataChannelObserver::OnStateChange() {
                 usbip_server_on_channel_open(g_server);
             }
 
-            std::string greeting = "Hello from peer identity token: [" + manager_.my_client_id_ + "]";
-            webrtc::DataBuffer buffer(greeting);
-            manager_.data_channel_->Send(buffer);
+            //std::string greeting = "Hello from peer identity token: [" + manager_.my_client_id_ + "]";
+            //webrtc::DataBuffer buffer(greeting);
+           // manager_.data_channel_->Send(buffer);
         } else if (current_state == webrtc::DataChannelInterface::kClosed || 
                    current_state == webrtc::DataChannelInterface::kClosing) {
             if (g_server) {
