@@ -1,4 +1,5 @@
 #include "gui.h"
+#include "logsync.h"
 #include <iostream>
 #include <string>
 #include <thread>
@@ -73,17 +74,25 @@ void AttachDataChannelCallback(WebRtcManager_usbipd* manager) {
     });
 }
 
-// --- CONNECT BUTTON ACTION HOOK ---
-void OnConnectButtonClicked(GUI& gui) {
-    std::cout << "\n[GUI Event] Connect button clicked. Initializing session sequence...\n" << std::endl;
+static bool is_session_starting = false;
 
-    // 1. Enumerate physical USB devices and populate GUI list items
+void OnShareUSBButtonClicked(GUI& gui) {
+    std::cout << "\n[GUI Event] ShareUSB button clicked. Initializing session sequence...\n" << std::endl;
+
+
     std::vector<std::string> usb_devices = usb_device_list_physical_devices();
     for (const auto& dev_str : usb_devices) {
         gui.addListItem(dev_str);
     }
+    
+    if (is_datachannel_connected || is_session_starting) {
+      SPDLOG_INFO("[GUI Event] Session is already active or initializing. Ignoring re-init.");
+      return;
+    }
 
-    // 2. Room ID setup & Capacity validation
+    is_session_starting = true; // Lock immediately to block concurrent clicks
+
+
     if (active_room_id.empty()) {
         active_room_id = GenerateRandomRoomId(20);
         host_server = true; 
@@ -102,7 +111,7 @@ void OnConnectButtonClicked(GUI& gui) {
         return;
     }
 
-    // 3. Setup USB/IP Server & VirtualBox Manager
+
     InitializeUsbIpServerSession();
 
     static std::unique_ptr<ScopedVBoxServiceManager> vbox_guard = nullptr;
@@ -120,7 +129,7 @@ void OnConnectButtonClicked(GUI& gui) {
         }
     }
 
-    // 4. Register Event Callbacks
+
     RegisterOnRoomReadyEvent([&](const std::string& ready_room_id) {
         SPDLOG_WARN("=================================================================");
         SPDLOG_WARN("[EVENT TRIGGERED] Room [{}] is full and ready for meeting!", ready_room_id);
@@ -218,7 +227,6 @@ int main(int argc, char* argv[]) {
         std::cerr << "Firebase setup crash exception encountered." << std::endl;
         return -1;
     }
-    SPDLOG_INFO("Successfully authenticated with Cloud Firestore. Client ID: [{}]", global_client_id);
 
     LoadConfigFromDisk(active_room_id, global_client_id);
 
@@ -229,9 +237,28 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    // Bind Connect Button Event Handler
-    gui.setConnectHandler([](GUI& target_gui) {
-        OnConnectButtonClicked(target_gui);
+    // Assign global GUI pointer so log sink can update labelText live
+    g_active_gui = &gui;
+
+    // Attach custom spdlog sink
+    auto gui_sink = std::make_shared<GuiLogSink<std::mutex>>();
+    spdlog::default_logger()->sinks().push_back(gui_sink);
+
+    SPDLOG_INFO("Successfully authenticated with Cloud Firestore. Client ID: [{}]", global_client_id);
+
+    // Bind ShareUSB Button Event Handler
+    gui.setShareUSBHandler([](GUI& target_gui) {
+        OnShareUSBButtonClicked(target_gui);
+    });
+
+    // Bind Log Button Event Handler to load history snapshots into list view
+    gui.setLogHandler([](GUI& target_gui) {
+        std::lock_guard<std::mutex> lock(g_log_mutex);
+        target_gui.clearListItems();
+        target_gui.addListItem("--- Recent Log Snapshot ---");
+        for (const auto& log : g_log_buffer) {
+            target_gui.addListItem(log);
+        }
     });
 
     // Background thread for handling heartbeat polling/signaling loops while GUI runs smoothly

@@ -51,7 +51,7 @@ find_package(SDL2 REQUIRED CONFIG)
 find_package(SDL2_ttf REQUIRED CONFIG)
 
 
-add_executable(gui_usbip WIN32 gui/gui.cpp gui/main.cpp
+add_executable(gui_usbip WIN32 gui/gui.cpp gui/main.cpp gui/logsync.cpp
     webrtc_usbipd.cpp
     signaling.cpp
     webrtc_stats.cpp

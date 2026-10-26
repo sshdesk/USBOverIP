@@ -2,9 +2,9 @@
 #include <iostream>
 #include <algorithm>
 
-const int WINDOW_WIDTH = 640;
-const int WINDOW_HEIGHT = 480;
-const int ITEM_HEIGHT = 30;
+const int WINDOW_WIDTH = 900;
+const int WINDOW_HEIGHT = 650;
+const int ITEM_HEIGHT = 22;
 
 static void renderText(SDL_Renderer* renderer, TTF_Font* font, const std::string& text, int x, int y, SDL_Color color) {
     if (text.empty()) return;
@@ -19,11 +19,12 @@ static void renderText(SDL_Renderer* renderer, TTF_Font* font, const std::string
 
 GUI::GUI() 
     : window(nullptr), renderer(nullptr), font(nullptr), isDraggingScrollbar(false) {
-    textBoxRect  = { 50, 50, 300, 40 };
-    buttonRect   = { 370, 50, 100, 40 };
-    bindBtnRect  = { 480, 50, 100, 40 };
-    listViewRect = { 50, 120, 530, 220 };
-    labelPos     = { 50, 360, 0, 0 };
+    textBoxRect  = { 50, 50, 360, 36 };
+    buttonRect   = { 425, 50, 140, 36 }; // ShareUSB Button
+    bindBtnRect  = { 575, 50, 130, 36 };
+    logBtnRect   = { 715, 50, 135, 36 };
+    listViewRect = { 50, 105, 800, 470 };
+    labelPos     = { 50, 585, 0, 0 };
 }
 
 GUI::~GUI() {
@@ -47,9 +48,9 @@ bool GUI::init() {
     renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (!renderer) return false;
 
-    font = TTF_OpenFont("assets/arial.ttf", 20);
-    if (!font) font = TTF_OpenFont("arial.ttf", 20);
-    if (!font) font = TTF_OpenFont("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20);
+    font = TTF_OpenFont("assets/arial.ttf", 14);
+    if (!font) font = TTF_OpenFont("arial.ttf", 14);
+    if (!font) font = TTF_OpenFont("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14);
 
     return true;
 }
@@ -89,7 +90,7 @@ void GUI::handleEvents(bool& running) {
             if (mx >= listViewRect.x && mx <= listViewRect.x + listViewRect.w &&
                 my >= listViewRect.y && my <= listViewRect.y + listViewRect.h) {
                 
-                int scrollSpeed = 15;
+                int scrollSpeed = 20;
                 state.scrollY -= e.wheel.y * scrollSpeed;
                 state.scrollY = std::clamp(state.scrollY, 0, maxScrollY);
             }
@@ -117,30 +118,34 @@ void GUI::handleEvents(bool& running) {
                     SDL_StopTextInput();
                 }
 
-                // Connect Button Click Event (formerly Add)
+                // ShareUSB Button Click
                 if (mx >= buttonRect.x && mx <= buttonRect.x + buttonRect.w &&
                     my >= buttonRect.y && my <= buttonRect.y + buttonRect.h) {
-                    //addListItem(state.inputText);
-                    //state.inputText.clear();
-
+                    state.pressedButton = 1;
                     state.listItems.clear();
                     state.selectedIndex = -1;
 
-                    if (connect_handler_) {
-                        connect_handler_(*this); // Trigger the external USB list loader logic
+                    if (share_usb_handler_) {
+                        share_usb_handler_(*this);
                     }    
-
                 }
-
-                // Bind Button Click Event
-                if (mx >= bindBtnRect.x && mx <= bindBtnRect.x + bindBtnRect.w &&
-                    my >= bindBtnRect.y && my <= bindBtnRect.y + bindBtnRect.h) {
-                    
+                // Bind Button Click
+                else if (mx >= bindBtnRect.x && mx <= bindBtnRect.x + bindBtnRect.w &&
+                         my >= bindBtnRect.y && my <= bindBtnRect.y + bindBtnRect.h) {
+                    state.pressedButton = 2;
                     if (state.selectedIndex >= 0 && state.selectedIndex < (int)state.listItems.size()) {
                         std::string message = "Selected Item: " + state.listItems[state.selectedIndex];
                         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Bind Info", message.c_str(), window);
                     } else {
                         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, "Warning", "Please select a list item first!", window);
+                    }
+                }
+                // Log Button Click
+                else if (mx >= logBtnRect.x && mx <= logBtnRect.x + logBtnRect.w &&
+                         my >= logBtnRect.y && my <= logBtnRect.y + logBtnRect.h) {
+                    state.pressedButton = 3;
+                    if (log_handler_) {
+                        log_handler_(*this);
                     }
                 }
 
@@ -152,7 +157,6 @@ void GUI::handleEvents(bool& running) {
                     
                     if (clickedIndex >= 0 && clickedIndex < (int)state.listItems.size()) {
                         state.selectedIndex = clickedIndex;
-                        //state.inputText = state.listItems[clickedIndex];
                         state.labelText = "Selected: " + state.listItems[clickedIndex];
                     }
                 }
@@ -161,6 +165,7 @@ void GUI::handleEvents(bool& running) {
         else if (e.type == SDL_MOUSEBUTTONUP) {
             if (e.button.button == SDL_BUTTON_LEFT) {
                 isDraggingScrollbar = false;
+                state.pressedButton = 0;
             }
         }
         else if (e.type == SDL_MOUSEMOTION && isDraggingScrollbar) {
@@ -221,6 +226,7 @@ void GUI::render() {
     SDL_Color black     = { 0, 0, 0, 255 };
     SDL_Color blue      = { 70, 130, 180, 255 };
     SDL_Color purple    = { 138, 43, 226, 255 }; 
+    SDL_Color orange    = { 209, 154, 102, 255 };
     SDL_Color gray      = { 60, 64, 72, 255 };
     SDL_Color highlight = { 100, 149, 237, 255 };
     SDL_Color green     = { 152, 195, 121, 255 };
@@ -230,15 +236,35 @@ void GUI::render() {
     SDL_RenderFillRect(renderer, &textBoxRect);
     if (font) renderText(renderer, font, state.inputText, textBoxRect.x + 8, textBoxRect.y + 8, black);
 
-    // Connect Button (adjusted text position for label length)
-    SDL_SetRenderDrawColor(renderer, blue.r, blue.g, blue.b, 255);
-    SDL_RenderFillRect(renderer, &buttonRect);
-    if (font) renderText(renderer, font, "Connect", buttonRect.x + 18, buttonRect.y + 8, white);
+    // ShareUSB Button
+    {
+        bool isPressed = (state.pressedButton == 1);
+        SDL_Rect rect = buttonRect;
+        if (isPressed) { rect.x += 2; rect.y += 2; }
+        SDL_SetRenderDrawColor(renderer, blue.r - (isPressed ? 30 : 0), blue.g - (isPressed ? 30 : 0), blue.b - (isPressed ? 30 : 0), 255);
+        SDL_RenderFillRect(renderer, &rect);
+        if (font) renderText(renderer, font, "ShareUSB", rect.x + 18, rect.y + 8, white);
+    }
 
     // Bind Button
-    SDL_SetRenderDrawColor(renderer, purple.r, purple.g, purple.b, 255);
-    SDL_RenderFillRect(renderer, &bindBtnRect);
-    if (font) renderText(renderer, font, "Bind", bindBtnRect.x + 28, bindBtnRect.y + 8, white);
+    {
+        bool isPressed = (state.pressedButton == 2);
+        SDL_Rect rect = bindBtnRect;
+        if (isPressed) { rect.x += 2; rect.y += 2; }
+        SDL_SetRenderDrawColor(renderer, purple.r - (isPressed ? 30 : 0), purple.g - (isPressed ? 30 : 0), purple.b - (isPressed ? 30 : 0), 255);
+        SDL_RenderFillRect(renderer, &rect);
+        if (font) renderText(renderer, font, "Bind", rect.x + 45, rect.y + 8, white);
+    }
+
+    // Log Button
+    {
+        bool isPressed = (state.pressedButton == 3);
+        SDL_Rect rect = logBtnRect;
+        if (isPressed) { rect.x += 2; rect.y += 2; }
+        SDL_SetRenderDrawColor(renderer, orange.r - (isPressed ? 30 : 0), orange.g - (isPressed ? 30 : 0), orange.b - (isPressed ? 30 : 0), 255);
+        SDL_RenderFillRect(renderer, &rect);
+        if (font) renderText(renderer, font, "Log", rect.x + 55, rect.y + 8, white);
+    }
 
     // ListView Panel
     SDL_SetRenderDrawColor(renderer, gray.r, gray.g, gray.b, 255);
@@ -279,7 +305,7 @@ void GUI::render() {
                     SDL_SetRenderDrawColor(renderer, highlight.r, highlight.g, highlight.b, 255);
                     SDL_RenderFillRect(renderer, &itemRect);
                 }
-                renderText(renderer, font, state.listItems[i], itemRect.x + 10, itemRect.y + 4, white);
+                renderText(renderer, font, state.listItems[i], itemRect.x + 10, itemRect.y + 3, white);
             }
         }
 

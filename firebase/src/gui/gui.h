@@ -14,6 +14,7 @@ struct UIState {
     int selectedIndex = -1;
     std::string labelText = "No item selected";
     int scrollY = 0;
+    int pressedButton = 0; // 0: None, 1: ShareUSB, 2: Bind, 3: Log
 };
 
 class GUI {
@@ -24,10 +25,14 @@ public:
     bool init();
     void run();
     void addListItem(const std::string& item);
+    void clearListItems() { state.listItems.clear(); state.selectedIndex = -1; }
     
-    // Callback hook triggered when Connect is pressed
-    using ConnectHandler = std::function<void(GUI&)>;
-    void setConnectHandler(ConnectHandler handler) { connect_handler_ = handler; }
+    using ShareUSBHandler = std::function<void(GUI&)>;
+    using LogHandler = std::function<void(GUI&)>;
+
+    void setShareUSBHandler(ShareUSBHandler handler) { share_usb_handler_ = handler; }
+    void setLogHandler(LogHandler handler) { log_handler_ = handler; }
+    void setLabelText(const std::string& text) { state.labelText = text; }
 
 private:
     void handleEvents(bool& running);
@@ -42,10 +47,12 @@ private:
     SDL_Rect textBoxRect;
     SDL_Rect buttonRect;
     SDL_Rect bindBtnRect;
+    SDL_Rect logBtnRect;
     SDL_Rect listViewRect;
     SDL_Rect labelPos;
 
-    ConnectHandler connect_handler_;
+    ShareUSBHandler share_usb_handler_;
+    LogHandler log_handler_;
 };
 
 #endif

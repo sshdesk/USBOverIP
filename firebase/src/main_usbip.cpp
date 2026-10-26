@@ -500,6 +500,21 @@ int wmain(int argc, wchar_t *argv[]) {
     HandleGracefulExit(active_room_id, global_client_id);
     tunnel_manager.Stop();
 
+    // Ensure 'detach -a' is called before exiting the application
+    {
+        std::vector<std::wstring> detach_args_w = { L"usbip", L"detach", L"-a" };
+        std::vector<wchar_t*> detach_argv_vec;
+        for (auto &wstr : detach_args_w) {
+            detach_argv_vec.push_back(wstr.data());
+        }
+        try {
+            usbipCLI(static_cast<int>(detach_argv_vec.size()), detach_argv_vec.data());
+            SPDLOG_INFO("Successfully executed automatic 'detach -a' on exit.");
+        } catch (const std::exception &e) {
+            SPDLOG_ERROR("Failed to execute 'detach -a' on exit: {}", e.what());
+        }
+    }
+
     if (core_server_connection) {
         core_server_connection->ShutdownConnection();
         core_server_connection.reset();
