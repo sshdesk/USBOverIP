@@ -146,7 +146,7 @@ bool VerifyAndReserveRoomCapacity(const std::string& room_id) {
                     uint64_t last_seen = data["lastSeen"].integer_value();
                     
                     int64_t diff = static_cast<int64_t>(current_time) - static_cast<int64_t>(last_seen);
-                    if (std::abs(diff) < 30000) { 
+                    if (std::abs(diff) < 30000) { // 30 seconds threshold
                         is_stale = false;
                     }
                 }
@@ -326,7 +326,7 @@ int GetActiveClientCount(const std::string& room_id) {
                 if (data.find("lastSeen") != data.end()) {
                     uint64_t last_seen = data["lastSeen"].integer_value();
                     int64_t diff = static_cast<int64_t>(current_time) - static_cast<int64_t>(last_seen);
-                    if (std::abs(diff) < 30000) { 
+                    if (std::abs(diff) < 30000) { // 30 seconds threshold
                         is_stale = false;
                     }
                 }

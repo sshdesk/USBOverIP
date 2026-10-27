@@ -444,7 +444,7 @@ int wmain(int argc, wchar_t *argv[]) {
     while (keep_running && !is_datachannel_connected) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         auto now = std::chrono::steady_clock::now();
-        if (sleep_ms == 30 && std::chrono::duration_cast<std::chrono::seconds>(now - last_heartbeat_time).count() >= 5) {
+        if (/*sleep_ms == 30 &&*/ std::chrono::duration_cast<std::chrono::seconds>(now - last_heartbeat_time).count() >= 5) {
             SetUserPresence(active_room_id, global_client_id, true);
             last_heartbeat_time = now;
         }

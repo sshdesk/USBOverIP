@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
+#include <functional>
 
 #include "signaling.h"
 #include "../webrtc_usbip.h"
@@ -29,12 +30,12 @@
 #include <libusbip/win_handle.h>
 #include <libusbip/win_socket.h>
 #include <libusbip/format_message.h>
-// REMOVE THESE INTERNAL SRC INCLUSIONS:
 #include <libusbip/src/usb_ids.h>
 #include <libusbip/src/strconv.h>
 #include <libusbip/src/file_ver.h>
 #include <resources/messages.h>
 #include <CLI11/CLI11.hpp>
+#include "logsync.h"
 
 using namespace usbip;
 
@@ -47,25 +48,72 @@ constexpr auto &str_zero_copy = "zero-copy";
 constexpr auto &str_low_latency = "low-latency";
 auto &msgtable_dll = L"resources";
 
+constexpr int kDefaultTunnelTcpPort = 3240;
+
 std::unique_ptr<WebRtcManager_usbip> client_tunnel_connection = nullptr;
-WebRtcTcpTunnelManager tunnel_manager(3240);
+WebRtcTcpTunnelManager tunnel_manager(kDefaultTunnelTcpPort);
 std::atomic<bool> client_tunnel_active{false};
 
-
+// Callback storage & mutex protection
+std::mutex g_callbacks_mutex;
+OnDataChannelOpenCallback g_on_datachannel_open = nullptr;
+OnTcpServerStartedCallback g_on_tcp_server_started = nullptr;
 
 void AttachDataChannelCallbackForClient(WebRtcManager_usbip* manager) {
     if (!manager) return;
     manager->SetDataChannelStateCallback([](bool is_open) {
         client_tunnel_active = is_open;
-        
         is_datachannel_connected = is_open;
+
+
+            // Thread-safe access to GUI
+        {
+            std::lock_guard<std::mutex> lock(g_log_mutex);
+            if (g_active_gui) {
+              if (is_open) {
+                g_active_gui->setLabelText("Data channel pipe opened");
+              } else {
+                g_active_gui->setLabelText("Data channel pipe closed");
+              }
+            }
+        }
+
         
         if (is_open) {
             SPDLOG_INFO("[Tunnel Manager] DataChannel opened. Linking to TCP tunnel manager...");
+
+            // 1. WebRTC DataChannel Open Callback
+            OnDataChannelOpenCallback dc_cb;
+            {
+                std::lock_guard<std::mutex> lock(g_callbacks_mutex);
+                dc_cb = g_on_datachannel_open;
+            }
+            if (dc_cb) {
+                try {
+                    dc_cb();
+                } catch (const std::exception& e) {
+                    SPDLOG_ERROR("Exception in OnDataChannelOpen callback: {}", e.what());
+                }
+            }
+
             if (client_tunnel_connection && client_tunnel_connection->GetDataChannel()) {
                 if (!tunnel_manager.Start()) {
                     SPDLOG_ERROR("Failed to start tunnel manager because TCP bind failed.");
                 } else {
+                    // 2. TCP Server Started Callback
+                    OnTcpServerStartedCallback tcp_cb;
+                    {
+                        std::lock_guard<std::mutex> lock(g_callbacks_mutex);
+                        tcp_cb = g_on_tcp_server_started;
+                    }
+                    if (tcp_cb) {
+                        try {
+                            tcp_cb(kDefaultTunnelTcpPort);
+                        } catch (const std::exception& e) {
+                            SPDLOG_ERROR("Exception in OnTcpServerStarted callback: {}", e.what());
+                        }
+                    }
+
                     tunnel_manager.HandleDataChannel(client_tunnel_connection->GetDataChannel(), client_tunnel_connection->GetSignalingThread());
                 }
             }
@@ -200,6 +248,26 @@ CLI::App& get_usbip_app() {
 
 } // namespace
 
+// Registration functions implementation
+void RegisterOnDataChannelOpenCallback(OnDataChannelOpenCallback callback) {
+    std::lock_guard<std::mutex> lock(g_callbacks_mutex);
+    g_on_datachannel_open = std::move(callback);
+}
+
+void RegisterOnTcpServerStartedCallback(OnTcpServerStartedCallback callback) {
+    std::lock_guard<std::mutex> lock(g_callbacks_mutex);
+    g_on_tcp_server_started = std::move(callback);
+}
+
+void RegisterOnTcpServerStartedCallback(std::function<void()> callback) {
+    std::lock_guard<std::mutex> lock(g_callbacks_mutex);
+    if (callback) {
+        g_on_tcp_server_started = [cb = std::move(callback)](int /*port*/) { cb(); };
+    } else {
+        g_on_tcp_server_started = nullptr;
+    }
+}
+
 namespace usbip {
 std::string get_last_error_msg(DWORD msg_id) {
     auto &mod = get_resource_module();
@@ -212,8 +280,6 @@ const UsbIds& get_ids() {
     return ids;
 }
 }
-
-
 
 void libusbip_spdlog_bridge(const std::string &msg) {
   std::string clean_msg = msg;
@@ -228,8 +294,6 @@ void libusbip_spdlog_bridge(const std::string &msg) {
 
 int usbipCLI(int argc, wchar_t *argv[]) {
     log::init();
-   // libusbip::set_debug_output(log::debug_msg);
-
     libusbip::set_debug_output(libusbip_spdlog_bridge);
 
     InitWinSock2 ws2;
@@ -282,7 +346,7 @@ int InitializeUsbIpClientTunnelSession() {
     SaveConfigToDisk(active_room_id, "info");
 
     SPDLOG_INFO("Evaluating capacity constraints for room matrix [{}]...", active_room_id);
-    if (!VerifyAndReserveRoomCapacity(active_room_id)) {
+    if (!VerifyAndReserveRoomCapacity(active_room_id, global_client_id)) {
         SPDLOG_ERROR("[CRITICAL REJECT] Access Denied: Room capacity limit reached.");
         return -1;
     }
@@ -292,7 +356,6 @@ int InitializeUsbIpClientTunnelSession() {
     AttachDataChannelCallbackForClient(client_tunnel_connection.get());
     client_tunnel_connection->SetRemotePeerId("ALL");
 
-    // Register WebRTC signaling events imported from main_usbip.cpp
     RegisterOnRoomReadyEvent([&](const std::string& ready_room_id) {
         SPDLOG_WARN("=================================================================");
         SPDLOG_WARN("[EVENT TRIGGERED] Room [{}] is full and ready for meeting!", ready_room_id);
@@ -308,7 +371,6 @@ int InitializeUsbIpClientTunnelSession() {
             client_tunnel_connection = nullptr;
         }
         client_tunnel_active = false;
-       
         is_datachannel_connected = false;
     });
 

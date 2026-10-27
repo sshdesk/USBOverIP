@@ -42,7 +42,7 @@ void LoadConfigFromDisk(std::string& out_room_id, std::string& out_log_level, co
 // Presence & Automated Purge Cleanups
 void SetUserPresence(const std::string& room_id, const std::string& my_client_id, bool is_online);
 void HandleGracefulExit(const std::string& room_id, const std::string& my_client_id);
-bool VerifyAndReserveRoomCapacity(const std::string& room_id);
+bool VerifyAndReserveRoomCapacity(const std::string& room_id, const std::string& my_client_id);
 
 // Event Registration Interface
 void RegisterOnRoomReadyEvent(RoomReadyCallback callback);
@@ -55,9 +55,11 @@ void ListenForTargetedMessages(const std::string& room_id, const std::string& my
 void SendTargetedMessage(const std::string& room_id, const std::string& my_client_id, 
                           const std::string& target_client_id, const std::string& text_payload);
 
-// Existing declarations...
+int GetActiveClientCount(const std::string& room_id, const std::string& my_client_id);
+bool IsRoomEmpty(const std::string& room_id, const std::string& my_client_id);
 
-int GetActiveClientCount(const std::string& room_id);
-bool IsRoomEmpty(const std::string& room_id);
+void StopHeartbeat();
+
+void StartHeartbeat(const std::string &room_id, const std::string &my_client_id);
 
 #endif // SIGNALING_H

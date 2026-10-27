@@ -15,12 +15,16 @@ extern GUI *g_active_gui;
 extern std::deque<std::string> g_log_buffer;
 extern std::mutex g_log_mutex;
 
-inline void SetupRotatingLogging(const std::string& level_str = "info") {
+inline void
+SetupRotatingLogging(bool host_server, const std::string &level_str = "info") {
     try {
         auto max_size = 1048576 * 5; // 5 MB
         auto max_files = 3;
         
-        auto rotating_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>("log.txt", max_size, max_files);
+        std::string log_file_name =    host_server ? "host_log.txt" : "client_log.txt";
+     
+
+        auto rotating_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(log_file_name, max_size, max_files);
         auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
         
         std::vector<spdlog::sink_ptr> sinks;
@@ -50,9 +54,9 @@ protected:
       log_str.pop_back();
     }
 
-    if (g_active_gui) {
+    /*if (g_active_gui) {
       g_active_gui->setLabelText(log_str);
-    }
+    }*/
 
     std::lock_guard<std::mutex> lock(g_log_mutex);
     g_log_buffer.push_back(log_str);
