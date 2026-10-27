@@ -14,7 +14,7 @@ struct UIState {
     int selectedIndex = -1;
     std::string labelText = "No item selected";
     int scrollY = 0;
-    int pressedButton = 0; // 0: None, 1: ShareUSB, 2: Bind, 3: Log
+    int pressedButton = 0; // 0: None, 1: ShareUSB, 2: Attach, 3: Log
 };
 
 class GUI {
@@ -28,9 +28,11 @@ public:
     void clearListItems() { state.listItems.clear(); state.selectedIndex = -1; }
     
     using ShareUSBHandler = std::function<void(GUI&)>;
+    using AttachHandler = std::function<void(GUI&)>;
     using LogHandler = std::function<void(GUI&)>;
 
     void setShareUSBHandler(ShareUSBHandler handler) { share_usb_handler_ = handler; }
+    void setAttachHandler(AttachHandler handler) { attach_handler_ = handler; }
     void setLogHandler(LogHandler handler) { log_handler_ = handler; }
     void setLabelText(const std::string& text) { state.labelText = text; }
 
@@ -46,12 +48,13 @@ private:
 
     SDL_Rect textBoxRect;
     SDL_Rect buttonRect;
-    SDL_Rect bindBtnRect;
+    SDL_Rect attachBtnRect;
     SDL_Rect logBtnRect;
     SDL_Rect listViewRect;
     SDL_Rect labelPos;
 
     ShareUSBHandler share_usb_handler_;
+    AttachHandler attach_handler_;
     LogHandler log_handler_;
 };
 

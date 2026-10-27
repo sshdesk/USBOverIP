@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 project(usbipd VERSION 1.0 LANGUAGES CXX)
 
 # Coordinated standard (Aligned to 17 to prevent Conan package warnings)
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_GLIBCXX_ASSERTIONS")
@@ -51,11 +51,14 @@ find_package(SDL2 REQUIRED CONFIG)
 find_package(SDL2_ttf REQUIRED CONFIG)
 
 
-add_executable(gui_usbip WIN32 gui/gui.cpp gui/main.cpp gui/logsync.cpp
+add_executable(gui_usbip WIN32 gui/gui.cpp gui/main.cpp gui/logsync.cpp  gui/usbip_commands.cpp
     webrtc_usbipd.cpp
+    webrtc_usbip.cpp
     signaling.cpp
     webrtc_stats.cpp
     vbox_service_manager.cpp
+    tcptunnel.cpp
+    usbip/userspace/usbip/usbip.rc
 
     # USBIPD Source Files
     usbipd/src/usb_device_hid.cpp  
@@ -65,7 +68,8 @@ add_executable(gui_usbip WIN32 gui/gui.cpp gui/main.cpp gui/logsync.cpp
 )
 
 target_include_directories(gui_usbip PRIVATE
-    usbipd/include   ./gui_usbip
+    usbipd/include  ./gui_usbip
+    usbip/include/usbip  usbip/userspace/usbip usbip/userspace
 )
 
 
@@ -83,6 +87,8 @@ target_link_libraries(gui_usbip PRIVATE
     openssl::openssl 
     Opus::opus 
     spdlog::spdlog 
+
+    usbip
 
     firebase_firestore
     firebase_database

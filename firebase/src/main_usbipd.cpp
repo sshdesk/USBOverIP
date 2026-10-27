@@ -311,7 +311,7 @@ int main(int argc, char *argv[]) {
             last_heartbeat_time = std::chrono::steady_clock::now();
         } else {
             auto now = std::chrono::steady_clock::now();
-            if (std::chrono::duration_cast<std::chrono::seconds>(now - last_heartbeat_time).count() >= 5) {
+            if ( sleep_ms == 30 && std::chrono::duration_cast<std::chrono::seconds>(now - last_heartbeat_time).count() >= 5) {
                 SetUserPresence(active_room_id, global_client_id, true);
                 last_heartbeat_time = now;
             }

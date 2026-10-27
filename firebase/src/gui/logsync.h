@@ -3,13 +3,39 @@
 
 #include <string>
 #include <deque>
+#include <vector>
 #include <mutex>
+#include <spdlog/spdlog.h>
 #include <spdlog/sinks/base_sink.h>
+#include <spdlog/sinks/rotating_file_sink.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
 #include "gui.h"
 
 extern GUI *g_active_gui;
 extern std::deque<std::string> g_log_buffer;
 extern std::mutex g_log_mutex;
+
+inline void SetupRotatingLogging(const std::string& level_str = "info") {
+    try {
+        auto max_size = 1048576 * 5; // 5 MB
+        auto max_files = 3;
+        
+        auto rotating_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>("log.txt", max_size, max_files);
+        auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+        
+        std::vector<spdlog::sink_ptr> sinks;
+        sinks.push_back(rotating_sink);
+        sinks.push_back(console_sink);
+        
+        auto logger = std::make_shared<spdlog::logger>("usbip_logger", sinks.begin(), sinks.end());
+        
+        spdlog::set_default_logger(logger);
+        spdlog::set_level(spdlog::level::from_str(level_str));
+        spdlog::flush_on(spdlog::level::info);
+    } catch (const spdlog::spdlog_ex& ex) {
+        std::printf("Log initialization failed: %s\n", ex.what());
+    }
+}
 
 template <typename Mutex>
 class GuiLogSink : public spdlog::sinks::base_sink<Mutex> {
@@ -24,12 +50,10 @@ protected:
       log_str.pop_back();
     }
 
-    // Update live status bar (labelText)
     if (g_active_gui) {
       g_active_gui->setLabelText(log_str);
     }
 
-    // Store in background log queue for the Log button
     std::lock_guard<std::mutex> lock(g_log_mutex);
     g_log_buffer.push_back(log_str);
     if (g_log_buffer.size() > 500)

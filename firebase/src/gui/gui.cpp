@@ -19,12 +19,12 @@ static void renderText(SDL_Renderer* renderer, TTF_Font* font, const std::string
 
 GUI::GUI() 
     : window(nullptr), renderer(nullptr), font(nullptr), isDraggingScrollbar(false) {
-    textBoxRect  = { 50, 50, 360, 36 };
-    buttonRect   = { 425, 50, 140, 36 }; // ShareUSB Button
-    bindBtnRect  = { 575, 50, 130, 36 };
-    logBtnRect   = { 715, 50, 135, 36 };
-    listViewRect = { 50, 105, 800, 470 };
-    labelPos     = { 50, 585, 0, 0 };
+    textBoxRect   = { 50, 50, 360, 36 };
+    buttonRect    = { 425, 50, 140, 36 }; // ShareUSB Button
+    attachBtnRect = { 575, 50, 130, 36 }; // Attach Button
+    logBtnRect    = { 715, 50, 135, 36 };
+    listViewRect  = { 50, 105, 800, 470 };
+    labelPos      = { 50, 585, 0, 0 };
 }
 
 GUI::~GUI() {
@@ -129,15 +129,12 @@ void GUI::handleEvents(bool& running) {
                         share_usb_handler_(*this);
                     }    
                 }
-                // Bind Button Click
-                else if (mx >= bindBtnRect.x && mx <= bindBtnRect.x + bindBtnRect.w &&
-                         my >= bindBtnRect.y && my <= bindBtnRect.y + bindBtnRect.h) {
+                // Attach Button Click
+                else if (mx >= attachBtnRect.x && mx <= attachBtnRect.x + attachBtnRect.w &&
+                         my >= attachBtnRect.y && my <= attachBtnRect.y + attachBtnRect.h) {
                     state.pressedButton = 2;
-                    if (state.selectedIndex >= 0 && state.selectedIndex < (int)state.listItems.size()) {
-                        std::string message = "Selected Item: " + state.listItems[state.selectedIndex];
-                        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Bind Info", message.c_str(), window);
-                    } else {
-                        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, "Warning", "Please select a list item first!", window);
+                    if (attach_handler_) {
+                        attach_handler_(*this);
                     }
                 }
                 // Log Button Click
@@ -246,14 +243,14 @@ void GUI::render() {
         if (font) renderText(renderer, font, "ShareUSB", rect.x + 18, rect.y + 8, white);
     }
 
-    // Bind Button
+    // Attach Button
     {
         bool isPressed = (state.pressedButton == 2);
-        SDL_Rect rect = bindBtnRect;
+        SDL_Rect rect = attachBtnRect;
         if (isPressed) { rect.x += 2; rect.y += 2; }
         SDL_SetRenderDrawColor(renderer, purple.r - (isPressed ? 30 : 0), purple.g - (isPressed ? 30 : 0), purple.b - (isPressed ? 30 : 0), 255);
         SDL_RenderFillRect(renderer, &rect);
-        if (font) renderText(renderer, font, "Bind", rect.x + 45, rect.y + 8, white);
+        if (font) renderText(renderer, font, "Attach", rect.x + 35, rect.y + 8, white);
     }
 
     // Log Button
