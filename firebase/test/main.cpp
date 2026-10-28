@@ -12,6 +12,7 @@
 
 #include "signaling.h"
 #include "webrtc.h"
+#include "tcptunnel.h"
 #include "firebase/app.h"
 #include "firebase/firestore.h"
 
@@ -29,9 +30,32 @@ std::unique_ptr<WebRtcManager> core_server_connection = nullptr;
 
 bool host_server = false;
 
+extern std::unique_ptr<SignalingClient> signaling_client;
+
+WebRtcTcpTunnelManager tunnel_manager(3240);
+
 void SignalExitHandler(int signum) {
     SPDLOG_WARN("\nProcess termination signal [{}] intercepted!", signum);
     keep_running = false;
+}
+
+// Register tunnel callbacks once globally to prevent callback stacking
+void InitializeTunnelCallbacks() {
+    tunnel_manager.RegisterOnTcpServerStartedCallback([]() {
+        SPDLOG_INFO("[Callback] TCP Tunnel Server successfully started and listening.");
+    });
+
+    tunnel_manager.RegisterOnTcpServerStoppedCallback([]() {
+        SPDLOG_WARN("[Callback] TCP Tunnel Server has stopped/disconnected.");
+    });
+
+    tunnel_manager.RegisterOnTcpClientConnectedCallback([]() {
+        SPDLOG_INFO("[Callback] TCP client successfully connected to the tunnel.");
+    });
+
+    tunnel_manager.RegisterOnTcpClientDisconnectedCallback([]() {
+        SPDLOG_WARN("[Callback] TCP client disconnected from the tunnel.");
+    });
 }
 
 void AttachDataChannelCallback(WebRtcManager* manager) {
@@ -40,14 +64,40 @@ void AttachDataChannelCallback(WebRtcManager* manager) {
         is_datachannel_connected = is_open;
         if (is_open) {
             SPDLOG_INFO("[Heartbeat Manager] DataChannel opened. Pausing Firebase polling & switching to 500ms loop.");
+            if (signaling_client) {
+                signaling_client->StopHeartbeat();
+            }
+            if (core_server_connection && core_server_connection->GetDataChannel()) {
+                if (!host_server) {
+                    // Run tunnel start asynchronously to prevent blocking the initialization/Firestore loop
+                    std::thread([]() {
+                        if (!tunnel_manager.Start()) {
+                            SPDLOG_ERROR("Failed to start tunnel manager because TCP bind failed.");
+                        } else {
+                            SPDLOG_INFO("Caller DataChannel linked. Linking to TCP tunnel manager...");
+                            tunnel_manager.HandleDataChannel(core_server_connection->GetDataChannel(), core_server_connection->GetSignalingThread());
+                        }
+                    }).detach();
+                }
+            }
         } else {
             SPDLOG_WARN("[Heartbeat Manager] DataChannel closed. Resuming Firebase polling & switching to 30ms loop.");
+            if (signaling_client) {
+                signaling_client->StartHeartbeat(active_room_id, global_client_id);
+            }
+            
+            // Run tunnel stop asynchronously to prevent deadlocks
+//            std::thread([]() {
+//                tunnel_manager.Stop();
+//            }).detach();
         }
     });
 }
 
 int main() {
-    SetupLogging("info");
+    signaling_client = std::make_unique<SignalingClient>();
+
+    signaling_client->SetupLogging("info");
     std::srand(static_cast<unsigned int>(std::time(nullptr)));
 
     std::signal(SIGINT, SignalExitHandler);
@@ -55,7 +105,10 @@ int main() {
 
     global_client_id = "cpp_peer_" + std::to_string(std::rand() % 90000 + 1000);
 
-    if (!InitializeFirebaseFramework()) {
+    // Initialize global tunnel event hooks once
+    InitializeTunnelCallbacks();
+
+    if (!signaling_client->InitializeFramework()) {
         SPDLOG_ERROR("Firebase setup crash exception encountered.");
         return -1;
     }
@@ -64,7 +117,7 @@ int main() {
 
     std::string saved_room_id = "";
     std::string saved_log_level = "info";
-    LoadConfigFromDisk(saved_room_id, saved_log_level);
+    signaling_client->LoadConfigFromDisk(saved_room_id, saved_log_level);
 
     std::string input_room;
     if (!saved_room_id.empty()) {
@@ -84,21 +137,21 @@ int main() {
     }
 
     if (input_room.empty()) {
-        active_room_id = GenerateRandomRoomId(20);
+        active_room_id = signaling_client->GenerateRandomRoomId(20);
         host_server = true; 
         SPDLOG_INFO("[Room Creation] Generated fresh room key and set role to Host Server: {}", active_room_id);
     } else {
         active_room_id = input_room;
-        host_server = IsRoomEmpty(active_room_id); 
+        host_server = signaling_client->IsRoomEmpty(active_room_id, global_client_id); 
         SPDLOG_INFO("[Room Join] Target room ID: {}. Assigned Role -> {}", active_room_id, host_server ? "Host Server" : "Client");
     }
 
-    SaveConfigToDisk(active_room_id, "info");
+    signaling_client->SaveConfigToDisk(active_room_id, "info");
 
     SPDLOG_INFO("Evaluating capacity constraints for room matrix [{}]...", active_room_id);
-    if (!VerifyAndReserveRoomCapacity(active_room_id)) {
+    if (!signaling_client->VerifyAndReserveRoomCapacity(active_room_id, global_client_id)) {
         std::cout << "\n[CRITICAL REJECT] Access Denied: Room capacity limit reached.\n" << std::endl;
-        ShutdownFirebaseFramework(nullptr);
+        signaling_client->ShutdownFramework();
         return -1;
     }
 
@@ -112,13 +165,13 @@ int main() {
         }
     }
 
-    RegisterOnRoomReadyEvent([&](const std::string& ready_room_id) {
+    signaling_client->RegisterOnRoomReadyEvent([&](const std::string& ready_room_id) {
         SPDLOG_WARN("=================================================================");
         SPDLOG_WARN("[EVENT TRIGGERED] Room [{}] is full and ready for meeting!", ready_room_id);
         SPDLOG_WARN("=================================================================");
     });
 
-    RegisterOnPeerLeftEvent([&](const std::string& peer_client_id) {
+    signaling_client->RegisterOnPeerLeftEvent([&](const std::string& peer_client_id) {
         SPDLOG_ERROR("=================================================================");
         SPDLOG_ERROR("[EVENT NOTICE] Peer [{}] has disconnected or left the room.", peer_client_id);
         SPDLOG_ERROR("=================================================================");
@@ -133,6 +186,8 @@ int main() {
             is_datachannel_connected = false;
             SPDLOG_INFO("[WebRTC State Reset] Standing by as Host. Waiting for new peer connection...");
         } else {
+            
+            tunnel_manager.Stop();
             if (core_server_connection) {
                 core_server_connection->ShutdownConnection();
                 core_server_connection = nullptr;
@@ -142,7 +197,7 @@ int main() {
         }
     });
 
-    RegisterOnSdpReceivedEvent([&](const std::string& sender_id, const std::string& type, const std::string& sdp) {
+    signaling_client->RegisterOnSdpReceivedEvent([&](const std::string& sender_id, const std::string& type, const std::string& sdp) {
         SPDLOG_INFO("[Signaling Event] Received remote SDP {} from peer: {}", type, sender_id);
         if (sender_id == global_client_id) return;
 
@@ -167,7 +222,7 @@ int main() {
         }
     });
 
-    RegisterOnIceReceivedEvent([&](const std::string& sender_id, const std::string& mid, int mline_index, const std::string & sdp) {
+    signaling_client->RegisterOnIceReceivedEvent([&](const std::string& sender_id, const std::string& mid, int mline_index, const std::string& sdp) {
         SPDLOG_INFO("[Signaling Event] Received remote ICE candidate (sdpMid: {}, sdpMLineIndex: {}) from peer: {}", mid, mline_index, sender_id);
         if (sender_id == global_client_id) return;
 
@@ -186,8 +241,7 @@ int main() {
         }
     });
 
-    SetUserPresence(active_room_id, global_client_id, true);
-    ListenForTargetedMessages(active_room_id, global_client_id);
+    signaling_client->ListenForTargetedMessages(active_room_id, global_client_id);
 
     std::cout << "\n=======================================================" << std::endl;
     std::cout << "MESSAGE FORMAT RULES:" << std::endl;
@@ -210,21 +264,11 @@ int main() {
         }
     });
 
-    auto last_heartbeat_time = std::chrono::steady_clock::now();
-
     while (keep_running) {
-        int sleep_ms = is_datachannel_connected ? 500 : 30;
+        int sleep_ms = 30;
         std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
 
-        if (is_datachannel_connected) {
-            last_heartbeat_time = std::chrono::steady_clock::now();
-        } else {
-            auto now = std::chrono::steady_clock::now();
-            if (std::chrono::duration_cast<std::chrono::seconds>(now - last_heartbeat_time).count() >= 5) {
-                SetUserPresence(active_room_id, global_client_id, true);
-                last_heartbeat_time = now;
-            }
-        }
+        if (!keep_running) break;
 
         std::string active_msg = "";
         {
@@ -240,14 +284,18 @@ int main() {
             if (delimiter_pos != std::string::npos) {
                 std::string target_peer = active_msg.substr(0, delimiter_pos);
                 std::string text_payload = active_msg.substr(delimiter_pos + 1);
-                SendTargetedMessage(active_room_id, global_client_id, target_peer, text_payload);
+                signaling_client->SendTargetedMessage(active_room_id, global_client_id, target_peer, text_payload);
             } else {
                 SPDLOG_WARN("Invalid format pattern! Remember to use 'target_id:message'.");
             }
         }
     }
 
-    HandleGracefulExit(active_room_id, global_client_id);
+    SPDLOG_INFO("Shutting down application cleanly...");
+
+    signaling_client->HandleGracefulExit(active_room_id, global_client_id);
+
+   tunnel_manager.Stop();
 
     if (core_server_connection) {
         core_server_connection->ShutdownConnection();
@@ -271,6 +319,8 @@ int main() {
     
     std::this_thread::sleep_for(std::chrono::milliseconds(40));
 
-    ShutdownFirebaseFramework(nullptr);
+   // 
+    signaling_client->ShutdownFramework();
+    signaling_client.reset();
     return 0;
 }

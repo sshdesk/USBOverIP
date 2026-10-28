@@ -28,6 +28,9 @@ public:
     void SetRemotePeerId(const std::string& peer_id) { remote_peer_id_ = peer_id; }
     bool IsDataChannelOpen() const;
 
+    rtc::scoped_refptr<webrtc::DataChannelInterface> GetDataChannel() const;
+    rtc::Thread* GetSignalingThread() const;
+
     void SetDataChannelStateCallback(DataChannelStateCallback callback);
     DataChannelStateCallback dc_state_callback_;
 

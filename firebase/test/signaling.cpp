@@ -9,61 +9,85 @@
 #include <cstdlib>
 #include <ctime>
 #include <future>
+#include <thread>
+#include <atomic>
 
 #include "firebase/app.h"
 #include "firebase/firestore.h"
 #include "firebase/util.h"
 
-firebase::firestore::Firestore* db = nullptr;
-std::string active_log_level = "info";
-
 using namespace firebase::firestore;
 
-static RoomReadyCallback global_room_ready_callback = nullptr;
-static PeerLeftCallback global_peer_left_callback = nullptr;
-static SdpReceivedCallback global_sdp_received_callback = nullptr;
-static IceReceivedCallback global_ice_received_callback = nullptr;
+// Define global signaling client pointer for external helper linkage
+std::unique_ptr<SignalingClient> signaling_client = nullptr;
 
-uint64_t GetCurrentEpochMs() {
+void SendTargetedMessage(const std::string& room_id, const std::string& my_client_id, 
+                          const std::string& target_client_id, const std::string& text_payload) {
+    if (signaling_client) {
+        signaling_client->SendTargetedMessage(room_id, my_client_id, target_client_id, text_payload);
+    }
+}
+
+SignalingClient::SignalingClient() = default;
+
+SignalingClient::~SignalingClient() {
+    ShutdownFramework();
+}
+
+uint64_t SignalingClient::GetCurrentEpochMs() const {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
-void SetupLogging(const std::string& level_str) {
+int64_t SignalingClient::ExtractEpochMs(const FieldValue& val) const {
+    if (val.is_timestamp()) {
+        firebase::Timestamp ts = val.timestamp_value();
+        return (ts.seconds() * 1000) + (ts.nanoseconds() / 1000000);
+    } else if (val.is_integer()) {
+        return val.integer_value();
+    }
+    return 0;
+}
+
+void SignalingClient::SetupLogging(const std::string& level_str) {
     std::string level = level_str;
     std::transform(level.begin(), level.end(), level.begin(), ::tolower);
     if (level == "debug") spdlog::set_level(spdlog::level::debug);
     else if (level == "trace") spdlog::set_level(spdlog::level::trace);
     else spdlog::set_level(spdlog::level::info);
-    active_log_level = level;
+    active_log_level_ = level;
 }
 
-bool InitializeFirebaseFramework() {
+bool SignalingClient::InitializeFramework() {
 #if defined(WEBRTC_WIN)
-    firebase::App* app = firebase::App::Create(firebase::AppOptions());
+    app_ = firebase::App::Create(firebase::AppOptions());
 #else
-    firebase::App* app = firebase::App::Create();
+    app_ = firebase::App::Create();
 #endif
-    if (!app) return false;
+    if (!app_) return false;
     
-    db = firebase::firestore::Firestore::GetInstance(app);
-    if (!db) return false;
+    db_ = firebase::firestore::Firestore::GetInstance(app_);
+    if (!db_) return false;
 
     firebase::firestore::Settings settings;
     settings.set_persistence_enabled(false);
     firebase::SetLogLevel(firebase::kLogLevelError);
-    db->set_settings(settings);
+    db_->set_settings(settings);
     
-    SPDLOG_INFO("[Firestore Engine] High-performance real-time configuration applied successfully.");
+    SPDLOG_DEBUG("[Firestore Engine] High-performance real-time configuration applied successfully.");
     return true;
 }
 
-void ShutdownFirebaseFramework(firebase::App* app) {
-    if (db) db = nullptr;
-    if (app) delete app;
+void SignalingClient::ShutdownFramework() {
+    StopHeartbeat();
+    db_ = nullptr;
+    if (app_) {
+        delete app_;
+        app_ = nullptr;
+    }
 }
 
-std::string GenerateRandomRoomId(size_t length) {
+std::string SignalingClient::GenerateRandomRoomId(size_t length) {
     const std::string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     std::string random_id;
     random_id.reserve(length);
@@ -73,7 +97,7 @@ std::string GenerateRandomRoomId(size_t length) {
     return random_id;
 }
 
-bool SaveConfigToDisk(const std::string& room_id, const std::string& log_level, const std::string& filename) {
+bool SignalingClient::SaveConfigToDisk(const std::string& room_id, const std::string& log_level, const std::string& filename) {
     std::ofstream configFile(filename);
     if (!configFile.is_open()) {
         SPDLOG_WARN("Could not open {} for writing.", filename);
@@ -84,7 +108,7 @@ bool SaveConfigToDisk(const std::string& room_id, const std::string& log_level, 
     return true;
 }
 
-void LoadConfigFromDisk(std::string& out_room_id, std::string& out_log_level, const std::string& filename) {
+void SignalingClient::LoadConfigFromDisk(std::string& out_room_id, std::string& out_log_level, const std::string& filename) {
     std::ifstream configFile(filename);
     out_room_id.clear();
     out_log_level = "info";
@@ -105,17 +129,20 @@ void LoadConfigFromDisk(std::string& out_room_id, std::string& out_log_level, co
     }
 }
 
-void SetUserPresence(const std::string& room_id, const std::string& my_client_id, bool is_online) {
-    if (!db) return;
-    DocumentReference user_doc = db->Collection("rooms").Document(room_id).Collection("users").Document(my_client_id);
+void SignalingClient::SetUserPresence(const std::string& room_id, const std::string& my_client_id, bool is_online) {
+    if (!db_ || room_id.empty() || my_client_id.empty()) return;
+    DocumentReference user_doc = db_->Collection("rooms").Document(room_id).Collection("users").Document(my_client_id);
     if (is_online) {
-        user_doc.Set({{"status", FieldValue::String("online")}, {"lastSeen", FieldValue::Integer(GetCurrentEpochMs())}});
+        user_doc.Set({
+            {"status", FieldValue::String("online")}, 
+            {"lastSeen", FieldValue::ServerTimestamp()}
+        });
     } else {
         user_doc.Delete();
     }
 }
 
-void DeleteCollectionRecursively(const CollectionReference& collection_ref) {
+void SignalingClient::DeleteCollectionRecursively(const CollectionReference& collection_ref) {
     collection_ref.Get().OnCompletion([collection_ref](const firebase::Future<QuerySnapshot>& future) {
         if (future.status() == firebase::kFutureStatusComplete && !future.error()) {
             auto snapshot = future.result();
@@ -127,91 +154,124 @@ void DeleteCollectionRecursively(const CollectionReference& collection_ref) {
     });
 }
 
-//bool VerifyAndReserveRoomCapacity(const std::string& room_id) {
-//    if (!db) return false;
-//    auto active_users_promise = std::make_shared<std::promise<size_t>>();
-//    std::future<size_t> active_users_future = active_users_promise->get_future();
-//
-//    CollectionReference users_ref = db->Collection("rooms").Document(room_id).Collection("users");
-//    users_ref.Get().OnCompletion([active_users_promise](const firebase::Future<QuerySnapshot>& future) {
-//        if (future.status() == firebase::kFutureStatusComplete && !future.error()) {
-//            active_users_promise->set_value(future.result()->documents().size());
-//        } else {
-//            active_users_promise->set_value(0);
-//        }
-//    });
-//
-//    active_users_future.wait();
-//    size_t current_occupancy = active_users_future.get();
-//    return current_occupancy < 2;
-//}
+void SignalingClient::PurgeOldMessages(const std::string& room_id) {
+    if (!db_ || room_id.empty()) return;
+    CollectionReference messages_ref = db_->Collection("rooms").Document(room_id).Collection("messages");
+    DeleteCollectionRecursively(messages_ref);
+}
 
-bool VerifyAndReserveRoomCapacity(const std::string& room_id) {
-    if (!db) return false;
-    auto active_users_promise = std::make_shared<std::promise<size_t>>();
-    std::future<size_t> active_users_future = active_users_promise->get_future();
+bool SignalingClient::VerifyAndReserveRoomCapacity(const std::string& room_id, const std::string& my_client_id) {
+    if (!db_ || room_id.empty()) return false;
+    
+    PurgeOldMessages(room_id);
 
-    CollectionReference users_ref = db->Collection("rooms").Document(room_id).Collection("users");
-    uint64_t current_time = GetCurrentEpochMs();
+    auto capacity_promise = std::make_shared<std::promise<bool>>();
+    std::future<bool> capacity_future = capacity_promise->get_future();
 
-    users_ref.Get().OnCompletion([active_users_promise, current_time](const firebase::Future<QuerySnapshot>& future) {
-        if (future.status() == firebase::kFutureStatusComplete && !future.error()) {
-            size_t active_count = 0;
-            for (const auto& doc : future.result()->documents()) {
-                MapFieldValue data = doc.GetData();
-                bool is_stale = true;
-                
-                if (data.find("lastSeen") != data.end()) {
-                    uint64_t last_seen = data["lastSeen"].integer_value();
-                    
-                    // Use absolute difference to safely handle minor system clock drift/skew
-                    int64_t diff = static_cast<int64_t>(current_time) - static_cast<int64_t>(last_seen);
-                    if (std::abs(diff) < 30000) { // 30 seconds threshold
-                        is_stale = false;
+    CollectionReference users_ref = db_->Collection("rooms").Document(room_id).Collection("users");
+
+    if (!my_client_id.empty()) {
+        SetUserPresence(room_id, my_client_id, true);
+    }
+
+    users_ref.Get().OnCompletion([capacity_promise, room_id, my_client_id, users_ref, this](const firebase::Future<QuerySnapshot>& future) {
+        if (future.status() != firebase::kFutureStatusComplete || future.error()) {
+            capacity_promise->set_value(false);
+            return;
+        }
+
+        auto snapshot = future.result();
+        const auto& docs = snapshot->documents();
+
+        int64_t ref_time_ms = static_cast<int64_t>(GetCurrentEpochMs());
+        std::vector<DocumentReference> docs_to_delete;
+        size_t active_other_count = 0;
+
+        for (const auto& doc : docs) {
+            std::string doc_id = doc.id();
+            if (!my_client_id.empty() && doc_id == my_client_id) {
+                continue; 
+            }
+
+            MapFieldValue data = doc.GetData();
+            bool is_stale = true;
+
+            if (data.find("lastSeen") != data.end()) {
+                const FieldValue& val = data["lastSeen"];
+                if (!val.is_null()) {
+                    int64_t last_seen = ExtractEpochMs(val);
+                    int64_t diff = ref_time_ms - last_seen;
+                    if (std::abs(diff) < 30000) {
+                        is_stale = false; 
                     }
                 }
-
-                if (is_stale) {
-                    SPDLOG_WARN("[Room Capacity] Purging stale client document: {}", doc.id());
-                    doc.reference().Delete();
-                } else {
-                    active_count++;
-                }
             }
-            active_users_promise->set_value(active_count);
+
+            if (is_stale) {
+                SPDLOG_WARN("[Room Capacity] Purging stale client document: {}", doc_id);
+                docs_to_delete.push_back(doc.reference());
+            } else {
+                active_other_count++;
+            }
+        }
+
+        auto evaluate_capacity = [capacity_promise, active_other_count, room_id, my_client_id, this]() {
+            bool allowed = (active_other_count < 2);
+            if (allowed) {
+                StartHeartbeat(room_id, my_client_id);
+            } else {
+                if (!my_client_id.empty()) {
+                    SetUserPresence(room_id, my_client_id, false);
+                }
+                SPDLOG_ERROR("[Room Capacity] Access Denied: Room is full (Active peers: {})", active_other_count);
+            }
+            capacity_promise->set_value(allowed);
+        };
+
+        if (!docs_to_delete.empty()) {
+            auto counter = std::make_shared<std::atomic<int>>(static_cast<int>(docs_to_delete.size()));
+            for (auto doc_ref : docs_to_delete) {
+                doc_ref.Delete().OnCompletion([counter, evaluate_capacity](const firebase::Future<void>& del_future) {
+                    if (--(*counter) == 0) {
+                        evaluate_capacity();
+                    }
+                });
+            }
         } else {
-            active_users_promise->set_value(0);
+            evaluate_capacity();
         }
     });
 
-    active_users_future.wait();
-    size_t current_occupancy = active_users_future.get();
-    return current_occupancy < 2;
+    if (capacity_future.wait_for(std::chrono::seconds(5)) == std::future_status::ready) {
+        return capacity_future.get();
+    }
+    
+    SPDLOG_ERROR("[Room Capacity] Timeout waiting for Firestore query response.");
+    return false;
 }
 
-void RegisterOnRoomReadyEvent(RoomReadyCallback callback) { global_room_ready_callback = callback; }
-void RegisterOnPeerLeftEvent(PeerLeftCallback callback) { global_peer_left_callback = callback; }
-void RegisterOnSdpReceivedEvent(SdpReceivedCallback callback) { global_sdp_received_callback = callback; }
-void RegisterOnIceReceivedEvent(IceReceivedCallback callback) { global_ice_received_callback = callback; }
+void SignalingClient::RegisterOnRoomReadyEvent(RoomReadyCallback callback) { room_ready_callback_ = callback; }
+void SignalingClient::RegisterOnPeerLeftEvent(PeerLeftCallback callback) { peer_left_callback_ = callback; }
+void SignalingClient::RegisterOnSdpReceivedEvent(SdpReceivedCallback callback) { sdp_received_callback_ = callback; }
+void SignalingClient::RegisterOnIceReceivedEvent(IceReceivedCallback callback) { ice_received_callback_ = callback; }
 
-void HandleGracefulExit(const std::string& room_id, const std::string& my_client_id) {
-    if (!db) return;
-    SPDLOG_INFO("Cleaning up Firestore presence nodes for client {}...", my_client_id);
+void SignalingClient::HandleGracefulExit(const std::string& room_id, const std::string& my_client_id) {
+    if (!db_ || room_id.empty()) return;
+    
+    StopHeartbeat();
     
     SendTargetedMessage(room_id, my_client_id, "ALL", "SYSTEM_EVENT: Goodbye! I have closed my connection.");
     SetUserPresence(room_id, my_client_id, false);
     
-    DocumentReference room_doc = db->Collection("rooms").Document(room_id);
+    DocumentReference room_doc = db_->Collection("rooms").Document(room_id);
     CollectionReference users_ref = room_doc.Collection("users");
     CollectionReference messages_ref = room_doc.Collection("messages");
 
-    users_ref.Get().OnCompletion([room_id, room_doc, users_ref, messages_ref](const firebase::Future<QuerySnapshot>& future) mutable {
+    users_ref.Get().OnCompletion([room_id, room_doc, users_ref, messages_ref, this](const firebase::Future<QuerySnapshot>& future) mutable {
         if (future.status() == firebase::kFutureStatusComplete && !future.error()) {
             auto snapshot = future.result();
             size_t remaining_users = snapshot->documents().size();
-            
-            SPDLOG_INFO("[Room Watchdog] Remaining active peers in room: {}", remaining_users);
-            
+                        
             if (remaining_users == 0) {
                 SPDLOG_WARN("[Room Watchdog] Last user left. Purging room database trace completely...");
                 DeleteCollectionRecursively(messages_ref);
@@ -220,24 +280,21 @@ void HandleGracefulExit(const std::string& room_id, const std::string& my_client
             }
         }
     });
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 }
 
-void ListenForTargetedMessages(const std::string& room_id, const std::string& my_client_id) {
-    if (!db) return;
-    uint64_t app_boot_time = GetCurrentEpochMs();
+void SignalingClient::ListenForTargetedMessages(const std::string& room_id, const std::string& my_client_id) {
+    if (!db_ || room_id.empty()) return;
+    room_ready_fired_ = false;
 
-    CollectionReference messages_ref = db->Collection("rooms").Document(room_id).Collection("messages");
-    CollectionReference users_ref = db->Collection("rooms").Document(room_id).Collection("users");
+    int64_t session_start_ms = static_cast<int64_t>(GetCurrentEpochMs()) - 30000;
+
+    CollectionReference messages_ref = db_->Collection("rooms").Document(room_id).Collection("messages");
+    CollectionReference users_ref = db_->Collection("rooms").Document(room_id).Collection("users");
 
     std::vector<FieldValue> allowed_targets = { FieldValue::String("ALL"), FieldValue::String(my_client_id) };
+    Query targeted_query = messages_ref.WhereIn("targetId", allowed_targets);
 
-    Query targeted_query = messages_ref
-        .WhereIn("targetId", allowed_targets)
-        .WhereGreaterThan("timestamp", FieldValue::Integer(app_boot_time));
-
-    users_ref.AddSnapshotListener([room_id, my_client_id](const QuerySnapshot& snapshot, Error error, const std::string& error_msg) {
+    users_ref.AddSnapshotListener([room_id, my_client_id, this](const QuerySnapshot& snapshot, Error error, const std::string& error_msg) {
         if (error != kErrorOk) return;
         for (const auto& change : snapshot.DocumentChanges()) {
             std::string user_id = change.document().id();
@@ -245,16 +302,21 @@ void ListenForTargetedMessages(const std::string& room_id, const std::string& my
             
             if (change.type() == DocumentChange::Type::kAdded) {
                 SPDLOG_INFO("[ROOM PRESENCE] Peer entered room active pool: {}", user_id);
+                if (snapshot.documents().size() >= 2 && !room_ready_fired_.exchange(true)) {
+                    SendTargetedMessage(room_id, my_client_id, "ALL", "SYSTEM_EVENT: ROOM_FULL_READY_FOR_WEBRTC");
+                    if (room_ready_callback_) room_ready_callback_(room_id);
+                }
             } else if (change.type() == DocumentChange::Type::kRemoved) {
                 SPDLOG_INFO("[ROOM PRESENCE] Peer left room active pool: {}", user_id);
-                if (global_peer_left_callback) global_peer_left_callback(user_id);
+                room_ready_fired_ = false;
+                if (peer_left_callback_) peer_left_callback_(user_id);
             }
         }
     });
 
-    targeted_query.AddSnapshotListener([room_id, my_client_id](const QuerySnapshot& snapshot, Error error, const std::string& error_msg) {
+    targeted_query.AddSnapshotListener([room_id, my_client_id, session_start_ms, this](const QuerySnapshot& snapshot, Error error, const std::string& error_msg) {
         if (error != kErrorOk) {
-            SPDLOG_ERROR("Snapshot listener broken down: {}", error_msg);
+            SPDLOG_ERROR("Snapshot listener error: {}", error_msg);
             return;
         }
         for (const auto& change : snapshot.DocumentChanges()) {
@@ -264,36 +326,45 @@ void ListenForTargetedMessages(const std::string& room_id, const std::string& my
                 std::string target_id = data["targetId"].string_value();
                 std::string text_body = data["text"].string_value();
                 
-                // Log the identifiers right here
+                if (sender_id == my_client_id) continue;
+
+                if (data.find("timestamp") != data.end()) {
+                    int64_t msg_time = ExtractEpochMs(data["timestamp"]);
+                    if (msg_time > 0 && msg_time < session_start_ms) {
+                        continue;
+                    }
+                }
+
                 SPDLOG_INFO("[Message Received] sender_id: [{}], target_id: [{}], my_client_id: [{}]", 
                             sender_id, target_id, my_client_id);
 
-                if (sender_id == my_client_id) continue;
-
                 if (text_body == "SYSTEM_EVENT: ROOM_FULL_READY_FOR_WEBRTC") {
-                    if (global_room_ready_callback) global_room_ready_callback(room_id);
+                    if (!room_ready_fired_.exchange(true)) {
+                        if (room_ready_callback_) room_ready_callback_(room_id);
+                    }
                     continue;
                 }
                 if (text_body == "SYSTEM_EVENT: Goodbye! I have closed my connection.") {
-                    if (global_peer_left_callback) global_peer_left_callback(sender_id);
+                    room_ready_fired_ = false;
+                    if (peer_left_callback_) peer_left_callback_(sender_id);
                     continue;
                 }
                 if (text_body.rfind("SDP_OFFER:", 0) == 0) {
-                    if (global_sdp_received_callback) global_sdp_received_callback(sender_id, "offer", text_body.substr(10));
+                    if (sdp_received_callback_) sdp_received_callback_(sender_id, "offer", text_body.substr(10));
                     continue;
                 }
                 if (text_body.rfind("SDP_ANSWER:", 0) == 0) {
-                    if (global_sdp_received_callback) global_sdp_received_callback(sender_id, "answer", text_body.substr(11));
+                    if (sdp_received_callback_) sdp_received_callback_(sender_id, "answer", text_body.substr(11));
                     continue;
                 }
                 if (text_body.rfind("ICE:", 0) == 0) {
-                    if (global_ice_received_callback) {
+                    if (ice_received_callback_) {
                         std::stringstream ss(text_body.substr(4));
                         std::string mid, index_str, candidate_sdp;
                         std::getline(ss, mid, ':');
                         std::getline(ss, index_str, ':');
                         std::getline(ss, candidate_sdp);
-                        global_ice_received_callback(sender_id, mid, std::stoi(index_str), candidate_sdp);
+                        ice_received_callback_(sender_id, mid, std::stoi(index_str), candidate_sdp);
                     }
                     continue;
                 }
@@ -301,43 +372,11 @@ void ListenForTargetedMessages(const std::string& room_id, const std::string& my
         }
     });
 
-//    // Ensure BOTH peers reliably fire room ready when occupancy hits 2
-//    users_ref.Get().OnCompletion([room_id, my_client_id](const firebase::Future<QuerySnapshot>& future) {
-//        if (future.status() == firebase::kFutureStatusComplete && !future.error()) {
-//            size_t occupancy = future.result()->documents().size();
-//            if (occupancy == 2) {
-//                SendTargetedMessage(room_id, my_client_id, "ALL", "SYSTEM_EVENT: ROOM_FULL_READY_FOR_WEBRTC");
-//                if (global_room_ready_callback) {
-//                    global_room_ready_callback(room_id);
-//                }
-//            }
-//        }
-//    });
-
-    // Change this block at the end of ListenForTargetedMessages in signaling.cpp
-    users_ref.Get().OnCompletion([room_id, my_client_id](const firebase::Future<QuerySnapshot>& future) {
-        if (future.status() == firebase::kFutureStatusComplete && !future.error()) {
-            size_t occupancy = future.result()->documents().size();
-            if (occupancy == 2) {
-                SendTargetedMessage(room_id, my_client_id, "ALL", "SYSTEM_EVENT: ROOM_FULL_READY_FOR_WEBRTC");
-                if (global_room_ready_callback) {
-                    global_room_ready_callback(room_id);
-                }
-            }
-        }
-    });
-
-
-
-
-/*
-    // Change this block at the end of ListenForTargetedMessages in signaling.cpp
-    users_ref.Get().OnCompletion([room_id, my_client_id](const firebase::Future<QuerySnapshot>& future) {
+    users_ref.Get().OnCompletion([room_id, my_client_id, this](const firebase::Future<QuerySnapshot>& future) {
         if (future.status() == firebase::kFutureStatusComplete && !future.error()) {
             auto snapshot = future.result();
             size_t occupancy = snapshot->documents().size();
 
-            // Count how many unique clients are NOT me
             bool has_remote_peer = false;
             for (const auto& doc_snap : snapshot->documents()) {
                 if (doc_snap.id() != my_client_id) {
@@ -346,77 +385,137 @@ void ListenForTargetedMessages(const std::string& room_id, const std::string& my
                 }
             }
 
-            // CRITICAL FIX: Only fire if occupancy is >= 2 AND a remote peer actually exists
             if (occupancy >= 2 && has_remote_peer) {
-                SendTargetedMessage(room_id, my_client_id, "ALL", "SYSTEM_EVENT: ROOM_FULL_READY_FOR_WEBRTC");
-                if (global_room_ready_callback) {
-                    global_room_ready_callback(room_id);
+                if (!room_ready_fired_.exchange(true)) {
+                    SendTargetedMessage(room_id, my_client_id, "ALL", "SYSTEM_EVENT: ROOM_FULL_READY_FOR_WEBRTC");
+                    if (room_ready_callback_) {
+                        room_ready_callback_(room_id);
+                    }
                 }
-            } else {
-                SPDLOG_INFO("[Room Monitoring] Waiting for remote clients... Current total users: {}", occupancy);
             }
         }
     });
-*/
-    
 }
 
-void SendTargetedMessage(const std::string& room_id, const std::string& my_client_id, 
-                          const std::string& target_client_id, const std::string& text_payload) {
-    if (!db) return;
-    CollectionReference messages_ref = db->Collection("rooms").Document(room_id).Collection("messages");
+void SignalingClient::SendTargetedMessage(const std::string& room_id, const std::string& my_client_id, 
+                                          const std::string& target_client_id, const std::string& text_payload) {
+    if (!db_ || room_id.empty() || my_client_id.empty()) return;
+    CollectionReference messages_ref = db_->Collection("rooms").Document(room_id).Collection("messages");
 
     MapFieldValue msg_map = {
         {"senderId",  FieldValue::String(my_client_id)},
         {"targetId",  FieldValue::String(target_client_id)},
         {"text",      FieldValue::String(text_payload)},
-        {"timestamp", FieldValue::Integer(GetCurrentEpochMs())}
+        {"timestamp", FieldValue::ServerTimestamp()}
     };
     messages_ref.Add(msg_map);
 }
 
-
-
-int GetActiveClientCount(const std::string& room_id) {
-    if (!db) return 0;
+int SignalingClient::GetActiveClientCount(const std::string& room_id, const std::string& my_client_id) {
+    if (!db_ || room_id.empty()) return 0;
     
     auto active_users_promise = std::make_shared<std::promise<size_t>>();
     std::future<size_t> active_users_future = active_users_promise->get_future();
 
-    CollectionReference users_ref = db->Collection("rooms").Document(room_id).Collection("users");
-    uint64_t current_time = GetCurrentEpochMs();
+    CollectionReference users_ref = db_->Collection("rooms").Document(room_id).Collection("users");
 
-    users_ref.Get().OnCompletion([active_users_promise, current_time](const firebase::Future<QuerySnapshot>& future) {
-        if (future.status() == firebase::kFutureStatusComplete && !future.error()) {
-            size_t active_count = 0;
-            for (const auto& doc : future.result()->documents()) {
-                MapFieldValue data = doc.GetData();
-                bool is_stale = true;
-                
-                if (data.find("lastSeen") != data.end()) {
-                    uint64_t last_seen = data["lastSeen"].integer_value();
-                    int64_t diff = static_cast<int64_t>(current_time) - static_cast<int64_t>(last_seen);
-                    if (std::abs(diff) < 30000) { // 30 seconds threshold
+    users_ref.Get().OnCompletion([active_users_promise, my_client_id, this](const firebase::Future<QuerySnapshot>& future) {
+        if (future.status() != firebase::kFutureStatusComplete || future.error()) {
+            active_users_promise->set_value(0);
+            return;
+        }
+
+        auto snapshot = future.result();
+        const auto& docs = snapshot->documents();
+
+        int64_t ref_time_ms = static_cast<int64_t>(GetCurrentEpochMs());
+        std::vector<DocumentReference> docs_to_delete;
+        size_t active_count = 0;
+
+        for (const auto& doc : docs) {
+            std::string doc_id = doc.id();
+            if (!my_client_id.empty() && doc_id == my_client_id) {
+                continue;
+            }
+
+            MapFieldValue data = doc.GetData();
+            bool is_stale = true;
+
+            if (data.find("lastSeen") != data.end()) {
+                const FieldValue& val = data["lastSeen"];
+                if (!val.is_null()) {
+                    int64_t last_seen = ExtractEpochMs(val);
+                    int64_t diff = ref_time_ms - last_seen;
+                    if (std::abs(diff) < 30000) {
                         is_stale = false;
                     }
                 }
-
-                if (!is_stale) {
-                    active_count++;
-                }
             }
+
+            if (is_stale) {
+                SPDLOG_WARN("[Active Count] Purging stale client document: {}", doc_id);
+                docs_to_delete.push_back(doc.reference());
+            } else {
+                active_count++;
+            }
+        }
+
+        auto finalize_count = [active_users_promise, active_count]() {
             active_users_promise->set_value(active_count);
+        };
+
+        if (!docs_to_delete.empty()) {
+            auto counter = std::make_shared<std::atomic<int>>(static_cast<int>(docs_to_delete.size()));
+            for (auto doc_ref : docs_to_delete) {
+                doc_ref.Delete().OnCompletion([counter, finalize_count](const firebase::Future<void>& del_future) {
+                    if (--(*counter) == 0) {
+                        finalize_count();
+                    }
+                });
+            }
         } else {
-            active_users_promise->set_value(0);
+            finalize_count();
         }
     });
 
-    active_users_future.wait();
-    return static_cast<int>(active_users_future.get());
+    if (active_users_future.wait_for(std::chrono::seconds(5)) == std::future_status::ready) {
+        return static_cast<int>(active_users_future.get());
+    }
+    return 0;
 }
 
-bool IsRoomEmpty(const std::string& room_id) {
-    int count = GetActiveClientCount(room_id);
-    SPDLOG_INFO("[Room Check] Room [{}] current active client count: {}", room_id, count);
+bool SignalingClient::IsRoomEmpty(const std::string& room_id, const std::string& my_client_id) {
+    int count = GetActiveClientCount(room_id, my_client_id);
+    SPDLOG_INFO("[Room Check] Room [{}] other active client count: {}", room_id, count);
     return (count == 0);
+}
+
+
+
+void SignalingClient::StopHeartbeat() {
+    heartbeat_active_ = false;
+    std::unique_ptr<std::thread> old_thread;
+    {
+        std::lock_guard<std::mutex> lock(heartbeat_mutex_);
+        old_thread = std::move(heartbeat_thread_);
+    }
+    if (old_thread && old_thread->joinable()) {
+        try {
+            old_thread->join();
+        } catch (...) {}
+    }
+}
+
+void SignalingClient::StartHeartbeat(const std::string& room_id, const std::string& my_client_id) {
+    StopHeartbeat();
+    std::lock_guard<std::mutex> lock(heartbeat_mutex_);
+    heartbeat_active_ = true;
+    heartbeat_thread_ = std::make_unique<std::thread>([room_id, my_client_id, this]() {
+        while (heartbeat_active_) {
+            SetUserPresence(room_id, my_client_id, true);
+            for (int i = 0; i < 100 && heartbeat_active_; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        }
+    });
 }

@@ -97,6 +97,12 @@ void WebRtcManager::StartConnectionSequence() {
 
 void WebRtcManager::ShutdownConnection() {
     SPDLOG_INFO("[WebRTC TearDown] Terminating secure media sessions and closing thread attachments.");
+    
+    // Explicitly notify state change listener about closure before tearing down
+    if (data_channel_ && dc_state_callback_) {
+        dc_state_callback_(false);
+    }
+
     if (data_channel_) {
         data_channel_->UnregisterObserver();
         data_channel_ = nullptr;
@@ -111,9 +117,8 @@ void WebRtcManager::ShutdownConnection() {
     if (worker_thread_) worker_thread_->Stop();
     if (signaling_thread_) signaling_thread_->Stop();
     
-    SPDLOG_WARN("[WebRTC TearDown] Native execution thread pools successfully unmounted.");
+    SPDLOG_INFO("[WebRTC TearDown] Native execution thread pools successfully unmounted.");
 }
-
 void WebRtcManager::HandleRemoteSdp(const std::string& type, const std::string& sdp) {
     if (!peer_connection_) {
         SPDLOG_ERROR("[WebRTC Router] Cannot assign remote SDP payload. PeerConnection pointer reference is null.");
@@ -253,8 +258,20 @@ void WebRtcManager::InternalDataChannelObserver::OnStateChange() {
 void WebRtcManager::InternalDataChannelObserver::OnMessage(const webrtc::DataBuffer& buffer) {
     std::string msg(reinterpret_cast<const char*> (buffer.data.data()), buffer.data.size());
     SPDLOG_INFO("[DATA CHANNEL RECEIVED BUFFER]: {}", msg);
+    
+   //  std::string greeting = "Hello from peer identity token: [" + manager_.my_client_id_ + "]";
+    //        webrtc::DataBuffer buffer(greeting);
+        //    manager_.data_channel_->Send(buffer);
 }
 
 bool WebRtcManager::IsDataChannelOpen() const {
     return data_channel_ && data_channel_->state() == webrtc::DataChannelInterface::kOpen;
+}
+
+rtc::scoped_refptr<webrtc::DataChannelInterface> WebRtcManager::GetDataChannel() const {
+    return data_channel_;
+}
+
+rtc::Thread* WebRtcManager::GetSignalingThread() const {
+    return signaling_thread_.get();
 }
