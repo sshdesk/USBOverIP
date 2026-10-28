@@ -99,6 +99,10 @@ WebRtcTcpTunnelManager::WebRtcTcpTunnelManager(int port)
   , running_(false)
   , listen_socket_(INVALID_SOCKET)
   , client_socket_(INVALID_SOCKET)
+  , tcp_server_started_callback_(nullptr)
+  , tcp_server_stopped_callback_(nullptr)
+  , tcp_client_connected_callback_(nullptr)
+  , tcp_client_disconnected_callback_(nullptr)
 {
   int tcpport = 3240;
   if (tcpport > 1024)
@@ -110,6 +114,26 @@ WebRtcTcpTunnelManager::WebRtcTcpTunnelManager(int port)
 WebRtcTcpTunnelManager::~WebRtcTcpTunnelManager()
 {
   Stop();
+}
+
+void WebRtcTcpTunnelManager::RegisterOnTcpServerStartedCallback(TcpServerStartedCallback callback)
+{
+  tcp_server_started_callback_ = std::move(callback);
+}
+
+void WebRtcTcpTunnelManager::RegisterOnTcpServerStoppedCallback(TcpServerStoppedCallback callback)
+{
+  tcp_server_stopped_callback_ = std::move(callback);
+}
+
+void WebRtcTcpTunnelManager::RegisterOnTcpClientConnectedCallback(TcpClientConnectedCallback callback)
+{
+  tcp_client_connected_callback_ = std::move(callback);
+}
+
+void WebRtcTcpTunnelManager::RegisterOnTcpClientDisconnectedCallback(TcpClientDisconnectedCallback callback)
+{
+  tcp_client_disconnected_callback_ = std::move(callback);
 }
 
 bool WebRtcTcpTunnelManager::Start()
@@ -173,6 +197,12 @@ bool WebRtcTcpTunnelManager::Start()
   running_.store(true);
   server_thread_ = std::thread(&WebRtcTcpTunnelManager::RunServerLoop, this);
   SPDLOG_INFO("TCP Server Listening on port {}", port_);
+
+  if (tcp_server_started_callback_)
+  {
+    tcp_server_started_callback_();
+  }
+
   return true;
 }
 
@@ -181,15 +211,23 @@ void WebRtcTcpTunnelManager::Stop()
   if (!running_.exchange(false))
     return;
 
+    
+ tunnel_observer_.reset();
+  
   SOCKET listen_snap = listen_socket_.exchange(INVALID_SOCKET);
   SOCKET client_snap = client_socket_.exchange(INVALID_SOCKET);
 
   if (listen_snap != INVALID_SOCKET)
     CloseSocketCrossPlatform(listen_snap);
+  
   if (client_snap != INVALID_SOCKET)
   {
     SPDLOG_INFO("TCP Client connection closed due to server shutdown.");
     CloseSocketCrossPlatform(client_snap);
+    if (tcp_client_disconnected_callback_)
+    {
+      tcp_client_disconnected_callback_();
+    }
   }
 
 #if defined(_WIN32) || defined(_WIN64)
@@ -200,6 +238,13 @@ void WebRtcTcpTunnelManager::Stop()
     server_thread_.join();
   if (proxy_thread_.joinable())
     proxy_thread_.join();
+
+  if (tcp_server_stopped_callback_)
+  {
+    tcp_server_stopped_callback_();
+  }
+  
+  
 }
 
 void WebRtcTcpTunnelManager::RunServerLoop()
@@ -213,15 +258,6 @@ void WebRtcTcpTunnelManager::RunServerLoop()
     SOCKET client_sock = accept(listen_sock, nullptr, nullptr);
     if (client_sock != INVALID_SOCKET)
     {
-/*      // Single client enforcement logic
-      SOCKET expected = INVALID_SOCKET;
-      if (!client_socket_.compare_exchange_strong(expected, client_sock))
-      {
-        SPDLOG_ERROR("Connection rejected: Only a single TCP client is allowed at a time.");
-        CloseSocketCrossPlatform(client_sock);
-        continue;
-      }
-*/
       SPDLOG_INFO("TCP Local client connected.");
       EnableTcpKeepAlive(client_sock);
       SetSocketNonBlocking(client_sock);
@@ -230,6 +266,15 @@ void WebRtcTcpTunnelManager::RunServerLoop()
       if (old_client != INVALID_SOCKET)
       {
         CloseSocketCrossPlatform(old_client);
+        if (tcp_client_disconnected_callback_)
+        {
+          tcp_client_disconnected_callback_();
+        }
+      }
+
+      if (tcp_client_connected_callback_)
+      {
+        tcp_client_connected_callback_();
       }
     }
   }
@@ -296,6 +341,10 @@ void WebRtcTcpTunnelManager::RunTcpToWebRtcLoop(rtc::scoped_refptr<webrtc::DataC
       SPDLOG_INFO("TCP Local client disconnected.");
       CloseSocketCrossPlatform(socket_snap);
       client_socket_.store(INVALID_SOCKET);
+      if (tcp_client_disconnected_callback_)
+      {
+        tcp_client_disconnected_callback_();
+      }
     }
     else
     {
@@ -304,6 +353,10 @@ void WebRtcTcpTunnelManager::RunTcpToWebRtcLoop(rtc::scoped_refptr<webrtc::DataC
       {
         CloseSocketCrossPlatform(socket_snap);
         client_socket_.store(INVALID_SOCKET);
+        if (tcp_client_disconnected_callback_)
+        {
+          tcp_client_disconnected_callback_();
+        }
       }
     }
   }

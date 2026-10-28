@@ -6,6 +6,7 @@
 #include <memory>
 #include <thread>
 #include <vector>
+#include <functional>
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <winsock2.h>
@@ -38,7 +39,10 @@ class WebRtcToTcpTunnel : public webrtc::DataChannelObserver
 {
 public:
   WebRtcToTcpTunnel(std::atomic<SOCKET>& client_socket, rtc::scoped_refptr<webrtc::DataChannelInterface> data_channel);
-  virtual ~WebRtcToTcpTunnel() = default;
+  
+  virtual ~WebRtcToTcpTunnel() {
+   _dataChannel = nullptr;
+  }
 
   void OnStateChange() override;
   void OnMessage(const webrtc::DataBuffer& buffer) override;
@@ -51,12 +55,22 @@ private:
 class WebRtcTcpTunnelManager
 {
 public:
+  using TcpServerStartedCallback = std::function<void()>;
+  using TcpServerStoppedCallback = std::function<void()>;
+  using TcpClientConnectedCallback = std::function<void()>;
+  using TcpClientDisconnectedCallback = std::function<void()>;
+
   WebRtcTcpTunnelManager(int port);
   ~WebRtcTcpTunnelManager();
 
   bool Start();
   void Stop();
   void HandleDataChannel(rtc::scoped_refptr<webrtc::DataChannelInterface> data_channel, rtc::Thread* webrtc_thread);
+  
+  void RegisterOnTcpServerStartedCallback(TcpServerStartedCallback callback);
+  void RegisterOnTcpServerStoppedCallback(TcpServerStoppedCallback callback);
+  void RegisterOnTcpClientConnectedCallback(TcpClientConnectedCallback callback);
+  void RegisterOnTcpClientDisconnectedCallback(TcpClientDisconnectedCallback callback);
 
 private:
   void RunServerLoop();
@@ -70,6 +84,11 @@ private:
   std::thread server_thread_;
   std::thread proxy_thread_;
   std::unique_ptr<WebRtcToTcpTunnel> tunnel_observer_;
+  
+  TcpServerStartedCallback tcp_server_started_callback_;
+  TcpServerStoppedCallback tcp_server_stopped_callback_;
+  TcpClientConnectedCallback tcp_client_connected_callback_;
+  TcpClientDisconnectedCallback tcp_client_disconnected_callback_;
 };
 
 #endif // TCPTUNNEL_H

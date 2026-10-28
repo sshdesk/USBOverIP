@@ -10,11 +10,11 @@
 struct UIState {
     std::string inputText = "enteryour@email.com";
     bool isInputActive = false;
-    std::vector<std::string> listItems = {"click share for sharing local usb."};
+    std::vector<std::string> listItems = {"Select an action to begin."};
     int selectedIndex = -1;
     std::string labelText = "No item selected";
     int scrollY = 0;
-    int pressedButton = 0; // 0: None, 1: ShareUSB, 2: Attach, 3: Log
+    int pressedButton = 0; // 0: None, 1: LocalUSB, 2: RemoteUSB, 3: RemoteAttach, 4: RemoteDetach, 5: Log
 };
 
 class GUI {
@@ -27,14 +27,24 @@ public:
     void addListItem(const std::string& item);
     void clearListItems() { state.listItems.clear(); state.selectedIndex = -1; }
     
-    using ShareUSBHandler = std::function<void(GUI&)>;
-    using AttachHandler = std::function<void(GUI&)>;
-    using LogHandler = std::function<void(GUI&)>;
+    using ButtonHandler = std::function<void(GUI&)>;
 
-    void setShareUSBHandler(ShareUSBHandler handler) { share_usb_handler_ = handler; }
-    void setAttachHandler(AttachHandler handler) { attach_handler_ = handler; }
-    void setLogHandler(LogHandler handler) { log_handler_ = handler; }
+    void setLocalUSBHandler(ButtonHandler handler)     { local_usb_handler_ = handler; }
+    void setRemoteUSBHandler(ButtonHandler handler)    { remote_usb_handler_ = handler; }
+    void setRemoteAttachHandler(ButtonHandler handler) { remote_attach_handler_ = handler; }
+    void setRemoteDetachHandler(ButtonHandler handler) { remote_detach_handler_ = handler; }
+    void setLogHandler(ButtonHandler handler)          { log_handler_ = handler; }
+
     void setLabelText(const std::string& text) { state.labelText = text; }
+
+    std::string getSelectedItem() const {
+        if (state.selectedIndex >= 0 && state.selectedIndex < static_cast<int>(state.listItems.size())) {
+            return state.listItems[state.selectedIndex];
+        }
+        return "";
+    }
+    int getSelectedIndex() const { return state.selectedIndex; }
+    std::string getInputText() const { return state.inputText; }
 
 private:
     void handleEvents(bool& running);
@@ -47,15 +57,19 @@ private:
     bool isDraggingScrollbar;
 
     SDL_Rect textBoxRect;
-    SDL_Rect buttonRect;
-    SDL_Rect attachBtnRect;
+    SDL_Rect localUsbBtnRect;
+    SDL_Rect remoteUsbBtnRect;
+    SDL_Rect remoteAttachBtnRect;
+    SDL_Rect remoteDetachBtnRect;
     SDL_Rect logBtnRect;
     SDL_Rect listViewRect;
     SDL_Rect labelPos;
 
-    ShareUSBHandler share_usb_handler_;
-    AttachHandler attach_handler_;
-    LogHandler log_handler_;
+    ButtonHandler local_usb_handler_;
+    ButtonHandler remote_usb_handler_;
+    ButtonHandler remote_attach_handler_;
+    ButtonHandler remote_detach_handler_;
+    ButtonHandler log_handler_;
 };
 
 #endif

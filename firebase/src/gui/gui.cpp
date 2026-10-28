@@ -19,12 +19,14 @@ static void renderText(SDL_Renderer* renderer, TTF_Font* font, const std::string
 
 GUI::GUI() 
     : window(nullptr), renderer(nullptr), font(nullptr), isDraggingScrollbar(false) {
-    textBoxRect   = { 50, 50, 360, 36 };
-    buttonRect    = { 425, 50, 140, 36 }; // ShareUSB Button
-    attachBtnRect = { 575, 50, 130, 36 }; // Attach Button
-    logBtnRect    = { 715, 50, 135, 36 };
-    listViewRect  = { 50, 105, 800, 470 };
-    labelPos      = { 50, 585, 0, 0 };
+    textBoxRect          = { 40, 50, 180, 36 };
+    localUsbBtnRect      = { 230, 50, 110, 36 };
+    remoteUsbBtnRect     = { 350, 50, 120, 36 };
+    remoteAttachBtnRect  = { 480, 50, 130, 36 };
+    remoteDetachBtnRect  = { 620, 50, 130, 36 };
+    logBtnRect           = { 760, 50, 100, 36 };
+    listViewRect         = { 40, 105, 820, 470 };
+    labelPos             = { 40, 585, 0, 0 };
 }
 
 GUI::~GUI() {
@@ -118,29 +120,44 @@ void GUI::handleEvents(bool& running) {
                     SDL_StopTextInput();
                 }
 
-                // ShareUSB Button Click
-                if (mx >= buttonRect.x && mx <= buttonRect.x + buttonRect.w &&
-                    my >= buttonRect.y && my <= buttonRect.y + buttonRect.h) {
+       
+                if (mx >= localUsbBtnRect.x && mx <= localUsbBtnRect.x + localUsbBtnRect.w &&
+                    my >= localUsbBtnRect.y && my <= localUsbBtnRect.y + localUsbBtnRect.h) {
                     state.pressedButton = 1;
                     state.listItems.clear();
                     state.selectedIndex = -1;
-
-                    if (share_usb_handler_) {
-                        share_usb_handler_(*this);
+                    if (local_usb_handler_) {
+                        local_usb_handler_(*this);
                     }    
                 }
-                // Attach Button Click
-                else if (mx >= attachBtnRect.x && mx <= attachBtnRect.x + attachBtnRect.w &&
-                         my >= attachBtnRect.y && my <= attachBtnRect.y + attachBtnRect.h) {
+        
+                else if (mx >= remoteUsbBtnRect.x && mx <= remoteUsbBtnRect.x + remoteUsbBtnRect.w &&
+                         my >= remoteUsbBtnRect.y && my <= remoteUsbBtnRect.y + remoteUsbBtnRect.h) {
                     state.pressedButton = 2;
-                    if (attach_handler_) {
-                        attach_handler_(*this);
+                    if (remote_usb_handler_) {
+                        remote_usb_handler_(*this);
                     }
                 }
-                // Log Button Click
+       
+                else if (mx >= remoteAttachBtnRect.x && mx <= remoteAttachBtnRect.x + remoteAttachBtnRect.w &&
+                         my >= remoteAttachBtnRect.y && my <= remoteAttachBtnRect.y + remoteAttachBtnRect.h) {
+                    state.pressedButton = 3;
+                    if (remote_attach_handler_) {
+                        remote_attach_handler_(*this);
+                    }
+                }
+                
+                else if (mx >= remoteDetachBtnRect.x && mx <= remoteDetachBtnRect.x + remoteDetachBtnRect.w &&
+                         my >= remoteDetachBtnRect.y && my <= remoteDetachBtnRect.y + remoteDetachBtnRect.h) {
+                    state.pressedButton = 4;
+                    if (remote_detach_handler_) {
+                        remote_detach_handler_(*this);
+                    }
+                }
+  
                 else if (mx >= logBtnRect.x && mx <= logBtnRect.x + logBtnRect.w &&
                          my >= logBtnRect.y && my <= logBtnRect.y + logBtnRect.h) {
-                    state.pressedButton = 3;
+                    state.pressedButton = 5;
                     if (log_handler_) {
                         log_handler_(*this);
                     }
@@ -219,48 +236,68 @@ void GUI::render() {
     SDL_SetRenderDrawColor(renderer, 40, 44, 52, 255);
     SDL_RenderClear(renderer);
 
-    SDL_Color white     = { 255, 255, 255, 255 };
-    SDL_Color black     = { 0, 0, 0, 255 };
-    SDL_Color blue      = { 70, 130, 180, 255 };
-    SDL_Color purple    = { 138, 43, 226, 255 }; 
-    SDL_Color orange    = { 209, 154, 102, 255 };
-    SDL_Color gray      = { 60, 64, 72, 255 };
-    SDL_Color highlight = { 100, 149, 237, 255 };
-    SDL_Color green     = { 152, 195, 121, 255 };
+    SDL_Color white       = { 255, 255, 255, 255 };
+    SDL_Color black       = { 0, 0, 0, 255 };
+    SDL_Color localColor  = { 70, 130, 180, 255 };   // Steel Blue
+    SDL_Color remoteColor = { 138, 43, 226, 255 };  // Purple (shared by RemoteUSB, RemoteAttach, and RemoteDetach)
+    SDL_Color logColor    = { 209, 154, 102, 255 };  // Orange
+    SDL_Color gray        = { 60, 64, 72, 255 };
+    SDL_Color highlight   = { 100, 149, 237, 255 };
+    SDL_Color green       = { 152, 195, 121, 255 };
 
     // TextBox
     SDL_SetRenderDrawColor(renderer, state.isInputActive ? 255 : 240, 240, 240, 255);
     SDL_RenderFillRect(renderer, &textBoxRect);
     if (font) renderText(renderer, font, state.inputText, textBoxRect.x + 8, textBoxRect.y + 8, black);
 
-    // ShareUSB Button
+
     {
         bool isPressed = (state.pressedButton == 1);
-        SDL_Rect rect = buttonRect;
+        SDL_Rect rect = localUsbBtnRect;
         if (isPressed) { rect.x += 2; rect.y += 2; }
-        SDL_SetRenderDrawColor(renderer, blue.r - (isPressed ? 30 : 0), blue.g - (isPressed ? 30 : 0), blue.b - (isPressed ? 30 : 0), 255);
+        SDL_SetRenderDrawColor(renderer, localColor.r - (isPressed ? 30 : 0), localColor.g - (isPressed ? 30 : 0), localColor.b - (isPressed ? 30 : 0), 255);
         SDL_RenderFillRect(renderer, &rect);
-        if (font) renderText(renderer, font, "ShareUSB", rect.x + 18, rect.y + 8, white);
+        if (font) renderText(renderer, font, "LocalUSB", rect.x + 20, rect.y + 8, white);
     }
 
-    // Attach Button
+
     {
         bool isPressed = (state.pressedButton == 2);
-        SDL_Rect rect = attachBtnRect;
+        SDL_Rect rect = remoteUsbBtnRect;
         if (isPressed) { rect.x += 2; rect.y += 2; }
-        SDL_SetRenderDrawColor(renderer, purple.r - (isPressed ? 30 : 0), purple.g - (isPressed ? 30 : 0), purple.b - (isPressed ? 30 : 0), 255);
+        SDL_SetRenderDrawColor(renderer, remoteColor.r - (isPressed ? 30 : 0), remoteColor.g - (isPressed ? 30 : 0), remoteColor.b - (isPressed ? 30 : 0), 255);
         SDL_RenderFillRect(renderer, &rect);
-        if (font) renderText(renderer, font, "Attach", rect.x + 35, rect.y + 8, white);
+        if (font) renderText(renderer, font, "RemoteUSB", rect.x + 18, rect.y + 8, white);
     }
 
-    // Log Button
+
     {
         bool isPressed = (state.pressedButton == 3);
+        SDL_Rect rect = remoteAttachBtnRect;
+        if (isPressed) { rect.x += 2; rect.y += 2; }
+        SDL_SetRenderDrawColor(renderer, remoteColor.r - (isPressed ? 30 : 0), remoteColor.g - (isPressed ? 30 : 0), remoteColor.b - (isPressed ? 30 : 0), 255);
+        SDL_RenderFillRect(renderer, &rect);
+        if (font) renderText(renderer, font, "RemoteAttach", rect.x + 14, rect.y + 8, white);
+    }
+
+
+    {
+        bool isPressed = (state.pressedButton == 4);
+        SDL_Rect rect = remoteDetachBtnRect;
+        if (isPressed) { rect.x += 2; rect.y += 2; }
+        SDL_SetRenderDrawColor(renderer, remoteColor.r - (isPressed ? 30 : 0), remoteColor.g - (isPressed ? 30 : 0), remoteColor.b - (isPressed ? 30 : 0), 255);
+        SDL_RenderFillRect(renderer, &rect);
+        if (font) renderText(renderer, font, "RemoteDetach", rect.x + 14, rect.y + 8, white);
+    }
+
+
+    {
+        bool isPressed = (state.pressedButton == 5);
         SDL_Rect rect = logBtnRect;
         if (isPressed) { rect.x += 2; rect.y += 2; }
-        SDL_SetRenderDrawColor(renderer, orange.r - (isPressed ? 30 : 0), orange.g - (isPressed ? 30 : 0), orange.b - (isPressed ? 30 : 0), 255);
+        SDL_SetRenderDrawColor(renderer, logColor.r - (isPressed ? 30 : 0), logColor.g - (isPressed ? 30 : 0), logColor.b - (isPressed ? 30 : 0), 255);
         SDL_RenderFillRect(renderer, &rect);
-        if (font) renderText(renderer, font, "Log", rect.x + 55, rect.y + 8, white);
+        if (font) renderText(renderer, font, "Log", rect.x + 36, rect.y + 8, white);
     }
 
     // ListView Panel

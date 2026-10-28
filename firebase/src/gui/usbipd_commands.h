@@ -9,36 +9,42 @@
 #include <cstdint>
 #include "usbip_server.h"
 
-// Forward declaration
 class WebRtcManager_usbipd;
+class ScopedVBoxServiceManager;
 
-// Shared global state defined in main.cpp
-extern std::atomic<bool> keep_running;
-extern std::atomic<bool> is_datachannel_connected;
-extern bool host_server;
-extern std::mutex clients_mutex;
-extern std::map<std::string, std::unique_ptr<WebRtcManager_usbipd>> connected_clients;
-extern std::unique_ptr<WebRtcManager_usbipd> core_server_connection;
+extern usbip_server_t *g_server;
 
-// Server context handle
-extern usbip_server_t* g_server;
+class UsbIpdCommands {
+public:
+    UsbIpdCommands();
+    ~UsbIpdCommands();
 
-// USB Passthrough Globals
-extern bool g_have_passthrough;
-extern std::string g_passthrough_busid;
-extern uint16_t g_passthrough_vid;
-extern uint16_t g_passthrough_pid;
-extern bool g_dynamic_mode;
+    // Disable copy and move semantics (std::mutex cannot be copied or moved)
+    UsbIpdCommands(const UsbIpdCommands&) = delete;
+    UsbIpdCommands& operator=(const UsbIpdCommands&) = delete;
+    UsbIpdCommands(UsbIpdCommands&&) = delete;
+    UsbIpdCommands& operator=(UsbIpdCommands&&) = delete;
 
-// Physical USB device enumeration
-std::vector<std::string> usb_device_list_physical_devices(void);
+    // Device Listing
+    std::vector<std::string> listPhysicalDevices();
 
-// USB/IP Server Session Lifecycle
-void InitializeUsbIpServerSession();
-void ShutdownUsbIpServerSession();
+    // Session Management
+    void initializeServerSession();
+    void shutdownServerSession();
+    bool startHostSession(const std::string& room_id, const std::string& client_id);
+    void shutdown();
 
-// WebRTC DataChannel Hook
-void AttachDataChannelCallback(WebRtcManager_usbipd* manager);
+    // Host Server Flag
+    bool isHostServer() const { return host_server_; }
+    void setHostServer(bool host) { host_server_ = host; }
 
-// Host room verification, signaling listener setup, and WebRTC offer initialization
-bool StartUsbIpHostSession(const std::string& active_room_id, const std::string& global_client_id);
+private:
+    void attachDataChannelCallback(WebRtcManager_usbipd* manager);
+
+    usbip_server_t* server_{nullptr};
+    std::mutex clients_mutex_;
+    std::map<std::string, std::unique_ptr<WebRtcManager_usbipd>> connected_clients_;
+    std::unique_ptr<WebRtcManager_usbipd> core_server_connection_{nullptr};
+    std::unique_ptr<ScopedVBoxServiceManager> vbox_guard_{nullptr};
+    bool host_server_{false};
+};

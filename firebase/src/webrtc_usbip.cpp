@@ -97,6 +97,10 @@ void WebRtcManager_usbip::StartConnectionSequence() {
 
 void WebRtcManager_usbip::ShutdownConnection() {
     SPDLOG_INFO("[WebRTC TearDown] Terminating secure media sessions and closing thread attachments.");
+    if (data_channel_ && dc_state_callback_) {
+        dc_state_callback_(false);
+    }
+
     if (data_channel_) {
         data_channel_->UnregisterObserver();
         data_channel_ = nullptr;
@@ -111,7 +115,7 @@ void WebRtcManager_usbip::ShutdownConnection() {
     if (worker_thread_) worker_thread_->Stop();
     if (signaling_thread_) signaling_thread_->Stop();
     
-    SPDLOG_WARN("[WebRTC TearDown] Native execution thread pools successfully unmounted.");
+    SPDLOG_INFO("[WebRTC TearDown] Native execution thread pools successfully unmounted.");
 }
 
 void WebRtcManager_usbip::HandleRemoteSdp(const std::string& type, const std::string& sdp) {

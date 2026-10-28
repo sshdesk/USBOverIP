@@ -17,8 +17,6 @@
 #include "signaling.h"
 #include "../webrtc_usbip.h"
 #include "../webrtc_stats.h"
-#include "firebase/app.h"
-#include "firebase/firestore.h"
 #include "../tcptunnel.h"
 
 #include "usbip.h"
@@ -36,10 +34,13 @@
 #include <resources/messages.h>
 #include <CLI11/CLI11.hpp>
 #include "logsync.h"
+#include "gui.h"
 
 using namespace usbip;
 
 extern std::atomic<bool> is_datachannel_connected;
+extern std::string active_room_id;
+extern std::string global_client_id;
 
 namespace {
 
@@ -47,82 +48,7 @@ const auto MAX_HUB_PORTS = 255;
 constexpr auto &str_zero_copy = "zero-copy";
 constexpr auto &str_low_latency = "low-latency";
 auto &msgtable_dll = L"resources";
-
 constexpr int kDefaultTunnelTcpPort = 3240;
-
-std::unique_ptr<WebRtcManager_usbip> client_tunnel_connection = nullptr;
-WebRtcTcpTunnelManager tunnel_manager(kDefaultTunnelTcpPort);
-std::atomic<bool> client_tunnel_active{false};
-
-// Callback storage & mutex protection
-std::mutex g_callbacks_mutex;
-OnDataChannelOpenCallback g_on_datachannel_open = nullptr;
-OnTcpServerStartedCallback g_on_tcp_server_started = nullptr;
-
-void AttachDataChannelCallbackForClient(WebRtcManager_usbip* manager) {
-    if (!manager) return;
-    manager->SetDataChannelStateCallback([](bool is_open) {
-        client_tunnel_active = is_open;
-        is_datachannel_connected = is_open;
-
-
-            // Thread-safe access to GUI
-        {
-            std::lock_guard<std::mutex> lock(g_log_mutex);
-            if (g_active_gui) {
-              if (is_open) {
-                g_active_gui->setLabelText("Data channel pipe opened");
-              } else {
-                g_active_gui->setLabelText("Data channel pipe closed");
-              }
-            }
-        }
-
-        
-        if (is_open) {
-            SPDLOG_INFO("[Tunnel Manager] DataChannel opened. Linking to TCP tunnel manager...");
-
-            // 1. WebRTC DataChannel Open Callback
-            OnDataChannelOpenCallback dc_cb;
-            {
-                std::lock_guard<std::mutex> lock(g_callbacks_mutex);
-                dc_cb = g_on_datachannel_open;
-            }
-            if (dc_cb) {
-                try {
-                    dc_cb();
-                } catch (const std::exception& e) {
-                    SPDLOG_ERROR("Exception in OnDataChannelOpen callback: {}", e.what());
-                }
-            }
-
-            if (client_tunnel_connection && client_tunnel_connection->GetDataChannel()) {
-                if (!tunnel_manager.Start()) {
-                    SPDLOG_ERROR("Failed to start tunnel manager because TCP bind failed.");
-                } else {
-                    // 2. TCP Server Started Callback
-                    OnTcpServerStartedCallback tcp_cb;
-                    {
-                        std::lock_guard<std::mutex> lock(g_callbacks_mutex);
-                        tcp_cb = g_on_tcp_server_started;
-                    }
-                    if (tcp_cb) {
-                        try {
-                            tcp_cb(kDefaultTunnelTcpPort);
-                        } catch (const std::exception& e) {
-                            SPDLOG_ERROR("Exception in OnTcpServerStarted callback: {}", e.what());
-                        }
-                    }
-
-                    tunnel_manager.HandleDataChannel(client_tunnel_connection->GetDataChannel(), client_tunnel_connection->GetSignalingThread());
-                }
-            }
-        } else {
-            SPDLOG_WARN("[Tunnel Manager] DataChannel closed. Stopping TCP tunnel manager.");
-            tunnel_manager.Stop();
-        }
-    });
-}
 
 auto get_ids_data() {
     win::Resource r(GetModuleHandle(nullptr), MAKEINTRESOURCE(IDR_USB_IDS), RT_RCDATA);
@@ -248,26 +174,6 @@ CLI::App& get_usbip_app() {
 
 } // namespace
 
-// Registration functions implementation
-void RegisterOnDataChannelOpenCallback(OnDataChannelOpenCallback callback) {
-    std::lock_guard<std::mutex> lock(g_callbacks_mutex);
-    g_on_datachannel_open = std::move(callback);
-}
-
-void RegisterOnTcpServerStartedCallback(OnTcpServerStartedCallback callback) {
-    std::lock_guard<std::mutex> lock(g_callbacks_mutex);
-    g_on_tcp_server_started = std::move(callback);
-}
-
-void RegisterOnTcpServerStartedCallback(std::function<void()> callback) {
-    std::lock_guard<std::mutex> lock(g_callbacks_mutex);
-    if (callback) {
-        g_on_tcp_server_started = [cb = std::move(callback)](int /*port*/) { cb(); };
-    } else {
-        g_on_tcp_server_started = nullptr;
-    }
-}
-
 namespace usbip {
 std::string get_last_error_msg(DWORD msg_id) {
     auto &mod = get_resource_module();
@@ -279,20 +185,85 @@ const UsbIds& get_ids() {
     assert(ids);
     return ids;
 }
+} // namespace usbip
+
+static void libusbip_spdlog_bridge(const std::string &msg) {
+    std::string clean_msg = msg;
+    while (!clean_msg.empty() && (clean_msg.back() == '\n' || clean_msg.back() == '\r')) {
+        clean_msg.pop_back();
+    }
+    if (!clean_msg.empty()) {
+        SPDLOG_INFO("[libusbip] {}", clean_msg);
+    }
 }
 
-void libusbip_spdlog_bridge(const std::string &msg) {
-  std::string clean_msg = msg;
-  while (!clean_msg.empty() &&
-         (clean_msg.back() == '\n' || clean_msg.back() == '\r')) {
-    clean_msg.pop_back();
-  }
-  if (!clean_msg.empty()) {
-    SPDLOG_INFO("[libusbip] {}", clean_msg);
-  }
+
+
+
+// --- UsbIpCommands Implementation ---
+
+UsbIpCommands::UsbIpCommands()
+    : tunnel_manager_(std::make_unique<WebRtcTcpTunnelManager>(kDefaultTunnelTcpPort)) {}
+
+UsbIpCommands::~UsbIpCommands() {
+    shutdownTunnel();
 }
 
-int usbipCLI(int argc, wchar_t *argv[]) {
+void UsbIpCommands::attachDataChannelCallback(WebRtcManager_usbip* manager) {
+    if (!manager) return;
+
+    manager->SetDataChannelStateCallback([this](bool is_open) {
+        client_tunnel_active_ = is_open;
+        is_datachannel_connected = is_open;
+
+        {
+            std::lock_guard<std::mutex> lock(g_log_mutex);
+            if (g_active_gui) {
+                if (is_open) {
+                    g_active_gui->setLabelText("Data channel pipe opened");
+                } else {
+                    g_active_gui->setLabelText("Data channel pipe closed");
+                }
+            }
+        }
+
+        if (is_open) {
+            SPDLOG_INFO("[Tunnel Manager] DataChannel opened. Linking to TCP tunnel manager...");
+
+            if (signaling_client) {
+                signaling_client->StopHeartbeat();
+            }
+
+            if (core_server_connection_ && core_server_connection_->GetDataChannel()) {
+                std::thread([this]() {
+                    if (!tunnel_manager_ || !tunnel_manager_->Start()) {
+                        SPDLOG_ERROR("Failed to start tunnel manager because TCP bind failed.");
+                    } else {
+                        SPDLOG_INFO("Caller DataChannel linked. Linking to TCP tunnel manager...");
+                        if (core_server_connection_) {
+                            tunnel_manager_->HandleDataChannel(
+                                core_server_connection_->GetDataChannel(),
+                                core_server_connection_->GetSignalingThread()
+                            );
+                        }
+                    }
+                }).detach();
+            }
+        } else {
+            SPDLOG_WARN("[Heartbeat Manager] DataChannel closed. Resuming Firebase polling & switching to 30ms loop.");
+            if (signaling_client) {
+                signaling_client->StartHeartbeat(active_room_id, global_client_id);
+            }
+            
+            SPDLOG_WARN("[Tunnel Manager] DataChannel closed. Stopping TCP tunnel manager.");
+            //if (tunnel_manager_) {
+            //    tunnel_manager_->Stop();
+            //}
+        }
+    });
+}
+
+int UsbIpCommands::executeCLI(int argc, wchar_t *argv[]) {
     log::init();
     libusbip::set_debug_output(libusbip_spdlog_bridge);
 
@@ -314,7 +285,7 @@ int usbipCLI(int argc, wchar_t *argv[]) {
     return EXIT_SUCCESS;
 }
 
-void execute_usbip_command(const std::vector<std::string>& args_utf8) {
+void UsbIpCommands::executeCommand(const std::vector<std::string>& args_utf8) {
     std::vector<std::wstring> args_w;
     for (const auto &arg : args_utf8) {
         args_w.push_back(std::wstring(arg.begin(), arg.end()));
@@ -326,87 +297,173 @@ void execute_usbip_command(const std::vector<std::string>& args_utf8) {
     }
 
     try {
-        usbipCLI(static_cast<int>(argv_vec.size()), argv_vec.data());
+        executeCLI(static_cast<int>(argv_vec.size()), argv_vec.data());
     } catch (const std::exception &e) {
         SPDLOG_ERROR("CLI execution exception: {}", e.what());
     }
 }
 
-int InitializeUsbIpClientTunnelSession() {
-    if (client_tunnel_connection) return 0;
-    
-    extern std::string active_room_id;
-    extern std::string global_client_id;
+int UsbIpCommands::initializeTunnelSession() {
+    if (core_server_connection_) return 0;
 
-    if (active_room_id.empty()) {
-        SPDLOG_ERROR("[Client Tunnel Init] Error: active_room_id is empty.");
-        return -2;
+    signaling_client = std::make_unique<SignalingClient>();
+    if (!signaling_client->InitializeFramework()) {
+        std::cerr << "Firebase setup crash exception encountered." << std::endl;
+        return -3;
     }
 
-    SaveConfigToDisk(active_room_id, "info");
+    std::string saved_log_level = "info";
+    signaling_client->LoadConfigFromDisk(active_room_id, saved_log_level);
+
+    std::srand(static_cast<unsigned int>(std::time(nullptr)));
+    global_client_id = "cpp_peer_" + std::to_string(std::rand() % 90000 + 1000);
+
+    if (active_room_id.empty()) {
+        active_room_id = signaling_client->GenerateRandomRoomId(20);
+        setHostServer(true);
+        g_active_gui->setLabelText("Room created for host server. Share this ID with your peer: " + active_room_id);
+    } else {
+        setHostServer(signaling_client->IsRoomEmpty(active_room_id, global_client_id));
+        g_active_gui->setLabelText("Joining room. Assigned Role -> " + std::string(isHostServer() ? "Host Server" : "Client"));
+    }
+
+    signaling_client->SaveConfigToDisk(active_room_id, "info");
+    SetupRotatingLogging(isHostServer(), "info");
+
+    if (!signaling_client) {
+        SPDLOG_ERROR("[Client Tunnel Init] Error: signaling_client instance is null.");
+        return -3;
+    }
 
     SPDLOG_INFO("Evaluating capacity constraints for room matrix [{}]...", active_room_id);
-    if (!VerifyAndReserveRoomCapacity(active_room_id, global_client_id)) {
+    if (!signaling_client->VerifyAndReserveRoomCapacity(active_room_id, global_client_id)) {
         SPDLOG_ERROR("[CRITICAL REJECT] Access Denied: Room capacity limit reached.");
         return -1;
     }
 
-    SPDLOG_INFO("[Client Tunnel Init] Instantiating WebRtcManager_usbip caller node...");
-    client_tunnel_connection = std::make_unique<WebRtcManager_usbip>(active_room_id, global_client_id, true);
-    AttachDataChannelCallbackForClient(client_tunnel_connection.get());
-    client_tunnel_connection->SetRemotePeerId("ALL");
+    if (!host_server_) {
+        SPDLOG_INFO("[Client Init] Instantiating WebRtcManager caller node to generate connection offer...");
+        core_server_connection_ = std::make_unique<WebRtcManager_usbip>(active_room_id, global_client_id, true);
+        attachDataChannelCallback(core_server_connection_.get());
+        core_server_connection_->SetRemotePeerId("ALL");
+        if (core_server_connection_->Initialize()) {
+            core_server_connection_->StartConnectionSequence();
+        }
+    } else {
+        SPDLOG_INFO("[Host server Init] Instantiating WebRtcManager caller waiting for offer...");
+    }
 
-    RegisterOnRoomReadyEvent([&](const std::string& ready_room_id) {
+    signaling_client->RegisterOnRoomReadyEvent([&](const std::string& ready_room_id) {
         SPDLOG_WARN("=================================================================");
         SPDLOG_WARN("[EVENT TRIGGERED] Room [{}] is full and ready for meeting!", ready_room_id);
         SPDLOG_WARN("=================================================================");
     });
 
-    RegisterOnPeerLeftEvent([&](const std::string& peer_client_id) {
+    signaling_client->RegisterOnPeerLeftEvent([this](const std::string& peer_client_id) {
         SPDLOG_ERROR("=================================================================");
         SPDLOG_ERROR("[EVENT NOTICE] Peer [{}] has disconnected or left the room.", peer_client_id);
         SPDLOG_ERROR("=================================================================");
-        if (client_tunnel_connection) {
-            client_tunnel_connection->ShutdownConnection();
-            client_tunnel_connection = nullptr;
+
+        if (host_server_) {
+            std::lock_guard<std::mutex> lock(clients_mutex_);
+            auto it = connected_clients_.find(peer_client_id);
+            if (it != connected_clients_.end()) {
+                if (it->second) {
+                    it->second->ShutdownConnection();
+                }
+                connected_clients_.erase(it);
+            }
+            is_datachannel_connected = false;
+            SPDLOG_INFO("[WebRTC State Reset] Standing by as Host. Waiting for new peer connection...");
+        } else {
+            shutdownTunnel();
         }
-        client_tunnel_active = false;
-        is_datachannel_connected = false;
     });
 
-    RegisterOnSdpReceivedEvent([&](const std::string& sender_id, const std::string& type, const std::string& sdp) {
+    signaling_client->RegisterOnSdpReceivedEvent([this](const std::string& sender_id, const std::string& type, const std::string& sdp) {
         SPDLOG_INFO("[Signaling Event] Received remote SDP {} from peer: {}", type, sender_id);
         if (sender_id == global_client_id) return;
-        if (client_tunnel_connection) {
-            client_tunnel_connection->SetRemotePeerId(sender_id);
-            client_tunnel_connection->HandleRemoteSdp(type, sdp);
+        if (host_server_) {
+            std::lock_guard<std::mutex> lock(clients_mutex_);
+            if (connected_clients_.find(sender_id) == connected_clients_.end()) {
+                SPDLOG_INFO("[Server Hub] Spawning new WebRtcManager instance for incoming client: {}", sender_id);
+                auto client_rtc = std::make_unique<WebRtcManager_usbip>(active_room_id, global_client_id, false);
+                attachDataChannelCallback(client_rtc.get());
+                client_rtc->SetRemotePeerId(sender_id);
+                if (client_rtc->Initialize()) {
+                    connected_clients_[sender_id] = std::move(client_rtc);
+                }
+            }
+            auto it = connected_clients_.find(sender_id);
+            if (it != connected_clients_.end() && it->second) {
+                it->second->SetRemotePeerId(sender_id);
+                it->second->HandleRemoteSdp(type, sdp);
+            }
+        } else {
+            if (core_server_connection_) {
+                core_server_connection_->SetRemotePeerId(sender_id);
+                core_server_connection_->HandleRemoteSdp(type, sdp);
+            }
         }
     });
 
-    RegisterOnIceReceivedEvent([&](const std::string& sender_id, const std::string& mid, int mline_index, const std::string & sdp) {
+    signaling_client->RegisterOnIceReceivedEvent([this](const std::string& sender_id, const std::string& mid, int mline_index, const std::string & sdp) {
         SPDLOG_INFO("[Signaling Event] Received remote ICE candidate (sdpMid: {}, sdpMLineIndex: {}) from peer: {}", mid, mline_index, sender_id);
         if (sender_id == global_client_id) return;
-        if (client_tunnel_connection) {
-            client_tunnel_connection->SetRemotePeerId(sender_id);
-            client_tunnel_connection->HandleRemoteIceCandidate(mid, mline_index, sdp);
+
+        if (host_server_) {
+            std::lock_guard<std::mutex> lock(clients_mutex_);
+            auto it = connected_clients_.find(sender_id);
+            if (it != connected_clients_.end() && it->second) {
+                it->second->SetRemotePeerId(sender_id);
+                it->second->HandleRemoteIceCandidate(mid, mline_index, sdp);
+            }
+        } else {
+            if (core_server_connection_) {
+                core_server_connection_->SetRemotePeerId(sender_id);
+                core_server_connection_->HandleRemoteIceCandidate(mid, mline_index, sdp);
+            }
         }
     });
 
-    SetUserPresence(active_room_id, global_client_id, true);
-    ListenForTargetedMessages(active_room_id, global_client_id);
-
-    if (client_tunnel_connection->Initialize()) {
-        client_tunnel_connection->StartConnectionSequence();
-    }
-
+    signaling_client->ListenForTargetedMessages(active_room_id, global_client_id);
     return 0;
 }
 
-void ShutdownUsbIpClientTunnel() {
-    tunnel_manager.Stop();
-    if (client_tunnel_connection) {
-        client_tunnel_connection->ShutdownConnection();
-        client_tunnel_connection.reset();
-        client_tunnel_connection = nullptr;
+void UsbIpCommands::shutdownTunnel() {
+    if (host_server_) {
+        std::lock_guard<std::mutex> lock(clients_mutex_);
+        for (auto& pair : connected_clients_) {
+            if (pair.second) {
+                pair.second->ShutdownConnection();
+            }
+        }
+        connected_clients_.clear();
+        SPDLOG_INFO("[WebRTC State Reset] Standing by as Host. Waiting for new peer connection...");
+    } else {
+        if (tunnel_manager_) {
+            tunnel_manager_->Stop();
+        }
+        if (core_server_connection_) {
+            core_server_connection_->ShutdownConnection();
+            core_server_connection_.reset();
+        }
+        SPDLOG_WARN("Host disconnected. Exiting signaling session room.");
+    }
+
+    client_tunnel_active_ = false;
+    is_datachannel_connected = false;
+}
+
+void UsbIpCommands::shutdown() {
+    if (signaling_client && !active_room_id.empty()) {
+        signaling_client->HandleGracefulExit(active_room_id, global_client_id);
+    }
+
+    shutdownTunnel();
+    
+    if (signaling_client) {
+        signaling_client->ShutdownFramework();
+        signaling_client.reset();
     }
 }
