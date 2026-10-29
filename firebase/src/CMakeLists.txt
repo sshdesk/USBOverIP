@@ -105,6 +105,64 @@ target_link_libraries(gui_usbip PRIVATE
 )
 
 
+
+add_executable(gui_usbip2 WIN32 gui/gui.cpp gui/main.cpp gui/logsync.cpp  gui/usbip_commands.cpp gui/usbipd_commands.cpp
+    webrtc_usbipd.cpp
+    webrtc_usbip.cpp
+    gui/signaling.cpp
+    webrtc_stats.cpp
+    vbox_service_manager.cpp
+    tcptunnel.cpp
+    usbip/userspace/usbip/usbip.rc
+
+    # USBIPD Source Files
+    usbipd/src/usb_device_hid.cpp  
+    usbipd/src/usb_device_passthrough.cpp  
+    usbipd/src/usbip_server.cpp  
+
+)
+
+target_include_directories(gui_usbip2 PRIVATE
+    usbipd/include  ./gui_usbip
+    usbip/include/usbip  usbip/userspace/usbip usbip/userspace
+)
+
+
+if(WIN32)
+    target_compile_definitions(gui_usbip2 PRIVATE WEBRTC_WIN NOMINMAX WIN32_LEAN_AND_MEAN)
+    
+    # Suppress the noisy LNK4099 warnings regarding missing internal libcurl PDB files
+    target_link_options(gui_usbip2 PRIVATE "/IGNORE:4099")
+else()
+    target_compile_definitions(gui_usbip2 PRIVATE WEBRTC_POSIX)
+endif()
+
+target_link_libraries(gui_usbip2 PRIVATE 
+    google-webrtc::google-webrtc 
+    openssl::openssl 
+    Opus::opus 
+    spdlog::spdlog 
+
+    usbip
+
+    firebase_firestore
+    firebase_database
+    firebase_auth
+    firebase_app
+        
+    ws2_32 winmm secur32 crypt32 iphlpapi shlwapi user32 gdi32
+
+        
+    ZLIB::ZLIB 
+    SDL2::SDL2
+    SDL2::SDL2main
+    sdl_ttf::sdl_ttf
+)
+
+
+
+
+
 add_executable(usbipd 
     main_usbipd.cpp
     webrtc_usbipd.cpp

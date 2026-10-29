@@ -12,6 +12,7 @@
 #include <memory>
 #include <thread>
 #include <atomic>
+#include <mutex>
 #include <spdlog/spdlog.h>
 
 #include "firebase/app.h"
@@ -20,10 +21,10 @@
 class SignalingClient {
 public:
     // Callback type definitions
-    using RoomReadyCallback = std::function<void(const std::string& room_id)>;
     using PeerLeftCallback = std::function<void(const std::string& peer_client_id)>;
     using SdpReceivedCallback = std::function<void(const std::string& sender_id, const std::string& type, const std::string& sdp)>;
     using IceReceivedCallback = std::function<void(const std::string& sender_id, const std::string& mid, int mline_index, const std::string& sdp)>;
+    using RoleAssignedCallback = std::function<void(bool is_caller, const std::string& remote_peer_id)>;
 
     SignalingClient();
     ~SignalingClient();
@@ -42,27 +43,24 @@ public:
     bool SaveConfigToDisk(const std::string& room_id, const std::string& log_level = "info", const std::string& filename = "config.txt");
     void LoadConfigFromDisk(std::string& out_room_id, std::string& out_log_level, const std::string& filename = "config.txt");
 
-    // Room and Presence Management
-    void SetUserPresence(const std::string& room_id, const std::string& my_client_id, bool is_online);
-    bool VerifyAndReserveRoomCapacity(const std::string& room_id, const std::string& my_client_id);
+    // Room Lifecycle & Role Assignment
+    void JoinRoom(const std::string& room_id, const std::string& my_client_id, RoleAssignedCallback on_role_assigned);
     void HandleGracefulExit(const std::string& room_id, const std::string& my_client_id);
+    void PurgeOldMessages(const std::string& room_id);
+
+    // Heartbeat Management (non-blocking background thread)
+    void StartHeartbeat(const std::string& room_id, const std::string& my_client_id);
+    void StopHeartbeat();
 
     // Event Registration
-    void RegisterOnRoomReadyEvent(RoomReadyCallback callback);
     void RegisterOnPeerLeftEvent(PeerLeftCallback callback);
     void RegisterOnSdpReceivedEvent(SdpReceivedCallback callback);
     void RegisterOnIceReceivedEvent(IceReceivedCallback callback);
 
-    // Messaging & State Check
+    // Messaging
     void ListenForTargetedMessages(const std::string& room_id, const std::string& my_client_id);
     void SendTargetedMessage(const std::string& room_id, const std::string& my_client_id, 
                              const std::string& target_client_id, const std::string& text_payload);
-    int GetActiveClientCount(const std::string& room_id, const std::string& my_client_id);
-    bool IsRoomEmpty(const std::string& room_id, const std::string& my_client_id);
-
-    // Heartbeat Control
-    void StartHeartbeat(const std::string& room_id, const std::string& my_client_id);
-    void StopHeartbeat();
 
     // Getters
     firebase::firestore::Firestore* GetDatabase() const { return db_; }
@@ -71,21 +69,20 @@ public:
 private:
     uint64_t GetCurrentEpochMs() const;
     int64_t ExtractEpochMs(const firebase::firestore::FieldValue& val) const;
-    void DeleteCollectionRecursively(const firebase::firestore::CollectionReference& collection_ref);
-    void PurgeOldMessages(const std::string& room_id);
+    static void DeleteCollectionRecursively(const firebase::firestore::CollectionReference& collection_ref);
 
     firebase::App* app_ = nullptr;
     firebase::firestore::Firestore* db_ = nullptr;
     std::string active_log_level_ = "info";
 
-    RoomReadyCallback room_ready_callback_ = nullptr;
     PeerLeftCallback peer_left_callback_ = nullptr;
     SdpReceivedCallback sdp_received_callback_ = nullptr;
     IceReceivedCallback ice_received_callback_ = nullptr;
 
+    firebase::firestore::ListenerRegistration messages_listener_reg_;
+
     std::atomic<bool> heartbeat_active_{false};
     std::unique_ptr<std::thread> heartbeat_thread_ = nullptr;
-    std::atomic<bool> room_ready_fired_{false};
     std::mutex heartbeat_mutex_;
 };
 

@@ -25,15 +25,11 @@ std::atomic<bool> keep_running{true};
 std::atomic<bool> is_datachannel_connected{false};
 std::string shared_input_buffer = "";
 std::mutex input_mutex;
-std::mutex clients_mutex;
 
 std::string active_room_id = ""; 
 std::string global_client_id = "";
 
-std::map<std::string, std::unique_ptr<WebRtcManager_usbipd>> connected_clients;
 std::unique_ptr<WebRtcManager_usbipd> core_server_connection = nullptr;
-
-bool host_server = false;
 
 // USBIP Globals
 usbip_server_t* g_server = nullptr;
@@ -89,15 +85,9 @@ void AttachDataChannelCallback(WebRtcManager_usbipd* manager) {
     manager->SetDataChannelStateCallback([](bool is_open) {
         is_datachannel_connected = is_open;
         if (is_open) {
-            SPDLOG_INFO("[Heartbeat Manager] DataChannel opened. Pausing Firebase polling & switching to 500ms loop.");
-            if (signaling_client) {
-                signaling_client->StopHeartbeat();
-            }
+            SPDLOG_INFO("[Heartbeat Manager] DataChannel opened. Active streaming tunnel linked.");
         } else {
-            SPDLOG_WARN("[Heartbeat Manager] DataChannel closed. Resuming Firebase polling & switching to 30ms loop.");
-            if (signaling_client && !active_room_id.empty() && !global_client_id.empty()) {
-                signaling_client->StartHeartbeat(active_room_id, global_client_id);
-            }
+            SPDLOG_WARN("[Heartbeat Manager] DataChannel closed.");
         }
     });
 }
@@ -136,7 +126,6 @@ int main(int argc, char *argv[]) {
 
     rtc::LogMessage::LogToDebug(rtc::LoggingSeverity::LS_ERROR);
 
-    // Initialize the global signaling client singleton
     signaling_client = std::make_unique<SignalingClient>();
     signaling_client->SetupLogging("info");
     std::srand(static_cast<unsigned int>(std::time(nullptr)));
@@ -174,90 +163,42 @@ int main(int argc, char *argv[]) {
         std::getline(std::cin, input_room);
     }
 
-    if (input_room.empty()) {
-        active_room_id = signaling_client->GenerateRandomRoomId(20);
-        host_server = true; 
-        SPDLOG_INFO("[Room Creation] Generated fresh room key and set role to Host Server: {}", active_room_id);
-    } else {
-        active_room_id = input_room;
-        host_server = signaling_client->IsRoomEmpty(active_room_id, global_client_id); 
-        SPDLOG_INFO("[Room Join] Target room ID: {}. Assigned Role -> {}", active_room_id, host_server ? "Host Server" : "Client");
-    }
-
+    active_room_id = input_room.empty() ? signaling_client->GenerateRandomRoomId(20) : input_room;
     signaling_client->SaveConfigToDisk(active_room_id, "info");
-
-    SPDLOG_INFO("Evaluating capacity constraints for room matrix [{}]...", active_room_id);
-    if (!signaling_client->VerifyAndReserveRoomCapacity(active_room_id, global_client_id)) {
-        std::cout << "\n[CRITICAL REJECT] Access Denied: Room capacity limit reached.\n" << std::endl;
-        signaling_client->ShutdownFramework();
-        return -1;
-    }
+    SPDLOG_INFO("[Room Matrix] Configured active session key: [{}]", active_room_id);
 
     // Setup USB/IP Server
     InitializeUsbIpServerSession();
-
-    std::unique_ptr<ScopedVBoxServiceManager> vbox_guard = nullptr;
-    if (host_server) {
-        vbox_guard = std::make_unique<ScopedVBoxServiceManager>();
-    }
-
-    if (!host_server) {
-        SPDLOG_INFO("[Client Init] Instantiating WebRtcManager caller node to generate connection offer...");
-        core_server_connection = std::make_unique<WebRtcManager_usbipd>(active_room_id, global_client_id, true);
-        AttachDataChannelCallback(core_server_connection.get());
-        core_server_connection->SetRemotePeerId("ALL");
-        if (core_server_connection->Initialize()) {
-            core_server_connection->StartConnectionSequence();
-        }
-    }
-
-    signaling_client->RegisterOnRoomReadyEvent([&](const std::string& ready_room_id) {
-        SPDLOG_WARN("=================================================================");
-        SPDLOG_WARN("[EVENT TRIGGERED] Room [{}] is full and ready for meeting!", ready_room_id);
-        SPDLOG_WARN("=================================================================");
-    });
+    auto vbox_guard = std::make_unique<ScopedVBoxServiceManager>();
 
     signaling_client->RegisterOnPeerLeftEvent([&](const std::string& peer_client_id) {
         SPDLOG_ERROR("=================================================================");
         SPDLOG_ERROR("[EVENT NOTICE] Peer [{}] has disconnected or left the room.", peer_client_id);
         SPDLOG_ERROR("=================================================================");
         
-        if (host_server) {
-            std::lock_guard<std::mutex> lock(clients_mutex);
-            auto it = connected_clients.find(peer_client_id);
-            if (it != connected_clients.end()) {
-                it->second->ShutdownConnection();
-                connected_clients.erase(it);
-            }
-            is_datachannel_connected = false;
-            SPDLOG_INFO("[WebRTC State Reset] Standing by as Host. Waiting for new peer connection...");
-        } else {
-            if (core_server_connection) {
-                core_server_connection->ShutdownConnection();
-                core_server_connection = nullptr;
-            }
-            SPDLOG_WARN("Host disconnected. Exiting signaling session room.");
-            keep_running = false;
+        if (core_server_connection) {
+            core_server_connection->ShutdownConnection();
+            core_server_connection.reset();
         }
+        is_datachannel_connected = false;
+        // Daemon remains running, standing by for new peer connections
+        SPDLOG_INFO("[WebRTC State Reset] Standing by as Host. Waiting for new peer connection...");
     });
 
     signaling_client->RegisterOnSdpReceivedEvent([&](const std::string& sender_id, const std::string& type, const std::string& sdp) {
         SPDLOG_INFO("[Signaling Event] Received remote SDP {} from peer: {}", type, sender_id);
         if (sender_id == global_client_id) return;
 
-        if (host_server) {
-            std::lock_guard<std::mutex> lock(clients_mutex);
-            if (connected_clients.find(sender_id) == connected_clients.end()) {
-                SPDLOG_INFO("[Server Hub] Spawning new WebRtcManager instance for incoming client: {}", sender_id);
-                auto client_rtc = std::make_unique<WebRtcManager_usbipd>(active_room_id, global_client_id, false);
-                AttachDataChannelCallback(client_rtc.get());
-                client_rtc->SetRemotePeerId(sender_id);
-                if (client_rtc->Initialize()) {
-                    connected_clients[sender_id] = std::move(client_rtc);
-                }
+        if (type == "offer") {
+            if (!core_server_connection) {
+                SPDLOG_INFO("[Callee Setup] Ingesting remote offer. Initializing responder pipeline...");
+                core_server_connection = std::make_unique<WebRtcManager_usbipd>(active_room_id, global_client_id, false);
+                AttachDataChannelCallback(core_server_connection.get());
+                core_server_connection->SetRemotePeerId(sender_id);
+                core_server_connection->Initialize();
             }
-            connected_clients[sender_id]->SetRemotePeerId(sender_id);
-            connected_clients[sender_id]->HandleRemoteSdp(type, sdp);
+            core_server_connection->SetRemotePeerId(sender_id);
+            core_server_connection->HandleRemoteSdp(type, sdp);
         } else {
             if (core_server_connection) {
                 core_server_connection->SetRemotePeerId(sender_id);
@@ -270,23 +211,31 @@ int main(int argc, char *argv[]) {
         SPDLOG_INFO("[Signaling Event] Received remote ICE candidate (sdpMid: {}, sdpMLineIndex: {}) from peer: {}", mid, mline_index, sender_id);
         if (sender_id == global_client_id) return;
 
-        if (host_server) {
-            std::lock_guard<std::mutex> lock(clients_mutex);
-            auto it = connected_clients.find(sender_id);
-            if (it != connected_clients.end() && it->second) {
-                it->second->SetRemotePeerId(sender_id);
-                it->second->HandleRemoteIceCandidate(mid, mline_index, sdp);
-            }
-        } else {
-            if (core_server_connection) {
-                core_server_connection->SetRemotePeerId(sender_id);
-                core_server_connection->HandleRemoteIceCandidate(mid, mline_index, sdp);
-            }
+        if (core_server_connection) {
+            core_server_connection->SetRemotePeerId(sender_id);
+            core_server_connection->HandleRemoteIceCandidate(mid, mline_index, sdp);
         }
     });
 
-   
     signaling_client->ListenForTargetedMessages(active_room_id, global_client_id);
+
+    // Join room: first peer to join acts as CALLEE; second acts as CALLER
+    signaling_client->JoinRoom(active_room_id, global_client_id, [&](bool is_caller, const std::string& remote_peer_id) {
+        if (is_caller) {
+            SPDLOG_INFO("[WebRTC Role] Assigned CALLER. Initiating connection offer to peer [{}]...", remote_peer_id);
+            core_server_connection = std::make_unique<WebRtcManager_usbipd>(active_room_id, global_client_id, true);
+            AttachDataChannelCallback(core_server_connection.get());
+            core_server_connection->SetRemotePeerId(remote_peer_id);
+            if (core_server_connection->Initialize()) {
+                core_server_connection->StartConnectionSequence();
+            }
+        } else {
+            SPDLOG_INFO("[WebRTC Role] Assigned CALLEE. Waiting for remote peer connection offer...");
+            core_server_connection = std::make_unique<WebRtcManager_usbipd>(active_room_id, global_client_id, false);
+            AttachDataChannelCallback(core_server_connection.get());
+            core_server_connection->Initialize();
+        }
+    });
 
     std::cout << "\n=======================================================" << std::endl;
     std::cout << "MESSAGE FORMAT RULES:" << std::endl;
@@ -308,14 +257,12 @@ int main(int argc, char *argv[]) {
             }
         }
     });
-
-    auto last_heartbeat_time = std::chrono::steady_clock::now();
+    input_thread.detach();
 
     while (keep_running) {
         int sleep_ms = is_datachannel_connected ? 500 : 30;
         std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
 
- 
         std::string active_msg = "";
         {
             std::lock_guard<std::mutex> lock(input_mutex);
@@ -345,21 +292,8 @@ int main(int argc, char *argv[]) {
         core_server_connection->ShutdownConnection();
         core_server_connection.reset();
     }
-    {
-        std::lock_guard<std::mutex> lock(clients_mutex);
-        for (auto& pair : connected_clients) {
-            if (pair.second) {
-                pair.second->ShutdownConnection();
-            }
-        }
-        connected_clients.clear();
-    }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
-
-    if (input_thread.joinable()) {
-        input_thread.join(); 
-    }
     
     if (g_server) {
         usbip_server_destroy(g_server);

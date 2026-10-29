@@ -8,9 +8,6 @@
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
-#include <future>
-#include <thread>
-#include <atomic>
 
 #include "firebase/app.h"
 #include "firebase/firestore.h"
@@ -80,6 +77,9 @@ bool SignalingClient::InitializeFramework() {
 
 void SignalingClient::ShutdownFramework() {
     StopHeartbeat();
+    if (messages_listener_reg_.is_valid()) {
+        messages_listener_reg_.Remove();
+    }
     db_ = nullptr;
     if (app_) {
         delete app_;
@@ -129,26 +129,12 @@ void SignalingClient::LoadConfigFromDisk(std::string& out_room_id, std::string& 
     }
 }
 
-void SignalingClient::SetUserPresence(const std::string& room_id, const std::string& my_client_id, bool is_online) {
-    if (!db_ || room_id.empty() || my_client_id.empty()) return;
-    DocumentReference user_doc = db_->Collection("rooms").Document(room_id).Collection("users").Document(my_client_id);
-    if (is_online) {
-        user_doc.Set({
-            {"status", FieldValue::String("online")}, 
-            {"lastSeen", FieldValue::ServerTimestamp()}
-        });
-    } else {
-        user_doc.Delete();
-    }
-}
-
 void SignalingClient::DeleteCollectionRecursively(const CollectionReference& collection_ref) {
     collection_ref.Get().OnCompletion([collection_ref](const firebase::Future<QuerySnapshot>& future) {
         if (future.status() == firebase::kFutureStatusComplete && !future.error()) {
             auto snapshot = future.result();
             for (const auto& doc_snap : snapshot->documents()) {
-                DocumentReference doc_ref = doc_snap.reference();
-                doc_ref.Delete();
+                doc_snap.reference().Delete();
             }
         }
     });
@@ -160,161 +146,132 @@ void SignalingClient::PurgeOldMessages(const std::string& room_id) {
     DeleteCollectionRecursively(messages_ref);
 }
 
-bool SignalingClient::VerifyAndReserveRoomCapacity(const std::string& room_id, const std::string& my_client_id) {
-    if (!db_ || room_id.empty()) return false;
-    
-    PurgeOldMessages(room_id);
-
-    auto capacity_promise = std::make_shared<std::promise<bool>>();
-    std::future<bool> capacity_future = capacity_promise->get_future();
-
-    CollectionReference users_ref = db_->Collection("rooms").Document(room_id).Collection("users");
-
-    if (!my_client_id.empty()) {
-        SetUserPresence(room_id, my_client_id, true);
+void SignalingClient::StopHeartbeat() {
+    heartbeat_active_ = false;
+    std::unique_ptr<std::thread> old_thread;
+    {
+        std::lock_guard<std::mutex> lock(heartbeat_mutex_);
+        old_thread = std::move(heartbeat_thread_);
     }
-
-    users_ref.Get().OnCompletion([capacity_promise, room_id, my_client_id, users_ref, this](const firebase::Future<QuerySnapshot>& future) {
-        if (future.status() != firebase::kFutureStatusComplete || future.error()) {
-            capacity_promise->set_value(false);
-            return;
-        }
-
-        auto snapshot = future.result();
-        const auto& docs = snapshot->documents();
-
-        int64_t ref_time_ms = static_cast<int64_t>(GetCurrentEpochMs());
-        std::vector<DocumentReference> docs_to_delete;
-        size_t active_other_count = 0;
-
-        for (const auto& doc : docs) {
-            std::string doc_id = doc.id();
-            if (!my_client_id.empty() && doc_id == my_client_id) {
-                continue; 
-            }
-
-            MapFieldValue data = doc.GetData();
-            bool is_stale = true;
-
-            if (data.find("lastSeen") != data.end()) {
-                const FieldValue& val = data["lastSeen"];
-                if (!val.is_null()) {
-                    int64_t last_seen = ExtractEpochMs(val);
-                    int64_t diff = ref_time_ms - last_seen;
-                    if (std::abs(diff) < 30000) {
-                        is_stale = false; 
-                    }
-                }
-            }
-
-            if (is_stale) {
-                SPDLOG_WARN("[Room Capacity] Purging stale client document: {}", doc_id);
-                docs_to_delete.push_back(doc.reference());
-            } else {
-                active_other_count++;
-            }
-        }
-
-        auto evaluate_capacity = [capacity_promise, active_other_count, room_id, my_client_id, this]() {
-            bool allowed = (active_other_count < 2);
-            if (allowed) {
-                StartHeartbeat(room_id, my_client_id);
-            } else {
-                if (!my_client_id.empty()) {
-                    SetUserPresence(room_id, my_client_id, false);
-                }
-                SPDLOG_ERROR("[Room Capacity] Access Denied: Room is full (Active peers: {})", active_other_count);
-            }
-            capacity_promise->set_value(allowed);
-        };
-
-        if (!docs_to_delete.empty()) {
-            auto counter = std::make_shared<std::atomic<int>>(static_cast<int>(docs_to_delete.size()));
-            for (auto doc_ref : docs_to_delete) {
-                doc_ref.Delete().OnCompletion([counter, evaluate_capacity](const firebase::Future<void>& del_future) {
-                    if (--(*counter) == 0) {
-                        evaluate_capacity();
-                    }
-                });
-            }
-        } else {
-            evaluate_capacity();
-        }
-    });
-
-    if (capacity_future.wait_for(std::chrono::seconds(5)) == std::future_status::ready) {
-        return capacity_future.get();
+    if (old_thread && old_thread->joinable()) {
+        try {
+            old_thread->join();
+        } catch (...) {}
     }
-    
-    SPDLOG_ERROR("[Room Capacity] Timeout waiting for Firestore query response.");
-    return false;
 }
 
-void SignalingClient::RegisterOnRoomReadyEvent(RoomReadyCallback callback) { room_ready_callback_ = callback; }
+void SignalingClient::StartHeartbeat(const std::string& room_id, const std::string& my_client_id) {
+    StopHeartbeat();
+    std::lock_guard<std::mutex> lock(heartbeat_mutex_);
+    heartbeat_active_ = true;
+    heartbeat_thread_ = std::make_unique<std::thread>([room_id, my_client_id, this]() {
+        while (heartbeat_active_) {
+            if (db_ && !room_id.empty() && !my_client_id.empty()) {
+                db_->Collection("rooms").Document(room_id).Collection("peers").Document(my_client_id).Set({
+                    {"lastSeen", FieldValue::ServerTimestamp()}
+                });
+            }
+            for (int i = 0; i < 30 && heartbeat_active_; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Sleep 3 seconds total
+            }
+        }
+    });
+}
+
+void SignalingClient::JoinRoom(const std::string& room_id, const std::string& my_client_id, 
+                               RoleAssignedCallback on_role_assigned) {
+    if (!db_ || room_id.empty() || my_client_id.empty()) return;
+
+    CollectionReference peers_ref = db_->Collection("rooms").Document(room_id).Collection("peers");
+
+    // Start background presence loop
+    StartHeartbeat(room_id, my_client_id);
+
+    // Initial presence write
+    peers_ref.Document(my_client_id).Set({
+        {"lastSeen", FieldValue::ServerTimestamp()}
+    }).OnCompletion([this, room_id, my_client_id, peers_ref, on_role_assigned](const firebase::Future<void>& set_future) {
+        // Query peers collection to see who else is in the room
+        peers_ref.Get().OnCompletion([this, room_id, my_client_id, on_role_assigned](const firebase::Future<QuerySnapshot>& future) {
+            if (future.status() != firebase::kFutureStatusComplete || future.error()) {
+                if (on_role_assigned) on_role_assigned(false, "");
+                return;
+            }
+
+            auto snapshot = future.result();
+            const auto& docs = snapshot->documents();
+            int64_t ref_time_ms = static_cast<int64_t>(GetCurrentEpochMs());
+
+            std::string existing_peer_id = "";
+            size_t active_other_peers = 0;
+
+            for (const auto& doc : docs) {
+                std::string doc_id = doc.id();
+                if (doc_id == my_client_id) continue;
+
+                MapFieldValue data = doc.GetData();
+                bool is_stale = true;
+
+                if (data.find("lastSeen") != data.end()) {
+                    const FieldValue& val = data["lastSeen"];
+                    if (!val.is_null()) {
+                        int64_t last_seen = ExtractEpochMs(val);
+                        int64_t diff = ref_time_ms - last_seen;
+                        // Since heartbeat runs every 3s, any peer updated within 20s is alive
+                        if (last_seen > 0 && diff < 20000) {
+                            is_stale = false;
+                        }
+                    }
+                }
+
+                if (is_stale) {
+                    SPDLOG_WARN("[JoinRoom] Purging stale peer document: {}", doc_id);
+                    doc.reference().Delete();
+                } else {
+                    existing_peer_id = doc_id;
+                    active_other_peers++;
+                }
+            }
+
+            if (active_other_peers == 0) {
+                // First peer to join room: purge previous stale room messages and stand by as Callee
+                PurgeOldMessages(room_id);
+                SPDLOG_INFO("[JoinRoom] First peer in room [{}]. Role -> CALLEE (waiting for offer).", room_id);
+                if (on_role_assigned) on_role_assigned(false, "");
+            } else {
+                // Second peer to join: act as Caller and send offer to existing_peer_id
+                SPDLOG_INFO("[JoinRoom] Found active peer [{}] in room [{}]. Role -> CALLER.", existing_peer_id, room_id);
+                if (on_role_assigned) on_role_assigned(true, existing_peer_id);
+            }
+        });
+    });
+}
+
 void SignalingClient::RegisterOnPeerLeftEvent(PeerLeftCallback callback) { peer_left_callback_ = callback; }
 void SignalingClient::RegisterOnSdpReceivedEvent(SdpReceivedCallback callback) { sdp_received_callback_ = callback; }
 void SignalingClient::RegisterOnIceReceivedEvent(IceReceivedCallback callback) { ice_received_callback_ = callback; }
 
 void SignalingClient::HandleGracefulExit(const std::string& room_id, const std::string& my_client_id) {
     if (!db_ || room_id.empty()) return;
-    
     StopHeartbeat();
-    
     SendTargetedMessage(room_id, my_client_id, "ALL", "SYSTEM_EVENT: Goodbye! I have closed my connection.");
-    SetUserPresence(room_id, my_client_id, false);
-    
-    DocumentReference room_doc = db_->Collection("rooms").Document(room_id);
-    CollectionReference users_ref = room_doc.Collection("users");
-    CollectionReference messages_ref = room_doc.Collection("messages");
-
-    users_ref.Get().OnCompletion([room_id, room_doc, users_ref, messages_ref, this](const firebase::Future<QuerySnapshot>& future) mutable {
-        if (future.status() == firebase::kFutureStatusComplete && !future.error()) {
-            auto snapshot = future.result();
-            size_t remaining_users = snapshot->documents().size();
-                        
-            if (remaining_users == 0) {
-                SPDLOG_WARN("[Room Watchdog] Last user left. Purging room database trace completely...");
-                DeleteCollectionRecursively(messages_ref);
-                DeleteCollectionRecursively(users_ref);
-                room_doc.Delete();
-            }
-        }
-    });
+    if (!my_client_id.empty()) {
+        db_->Collection("rooms").Document(room_id).Collection("peers").Document(my_client_id).Delete();
+    }
 }
 
 void SignalingClient::ListenForTargetedMessages(const std::string& room_id, const std::string& my_client_id) {
     if (!db_ || room_id.empty()) return;
-    room_ready_fired_ = false;
 
-    int64_t session_start_ms = static_cast<int64_t>(GetCurrentEpochMs()) - 30000;
+    int64_t session_start_ms = static_cast<int64_t>(GetCurrentEpochMs()) - 1000;
 
     CollectionReference messages_ref = db_->Collection("rooms").Document(room_id).Collection("messages");
-    CollectionReference users_ref = db_->Collection("rooms").Document(room_id).Collection("users");
-
     std::vector<FieldValue> allowed_targets = { FieldValue::String("ALL"), FieldValue::String(my_client_id) };
     Query targeted_query = messages_ref.WhereIn("targetId", allowed_targets);
 
-    users_ref.AddSnapshotListener([room_id, my_client_id, this](const QuerySnapshot& snapshot, Error error, const std::string& error_msg) {
-        if (error != kErrorOk) return;
-        for (const auto& change : snapshot.DocumentChanges()) {
-            std::string user_id = change.document().id();
-            if (user_id == my_client_id) continue;
-            
-            if (change.type() == DocumentChange::Type::kAdded) {
-                SPDLOG_INFO("[ROOM PRESENCE] Peer entered room active pool: {}", user_id);
-                if (snapshot.documents().size() >= 2 && !room_ready_fired_.exchange(true)) {
-                    SendTargetedMessage(room_id, my_client_id, "ALL", "SYSTEM_EVENT: ROOM_FULL_READY_FOR_WEBRTC");
-                    if (room_ready_callback_) room_ready_callback_(room_id);
-                }
-            } else if (change.type() == DocumentChange::Type::kRemoved) {
-                SPDLOG_INFO("[ROOM PRESENCE] Peer left room active pool: {}", user_id);
-                room_ready_fired_ = false;
-                if (peer_left_callback_) peer_left_callback_(user_id);
-            }
-        }
-    });
+    if (messages_listener_reg_.is_valid()) messages_listener_reg_.Remove();
 
-    targeted_query.AddSnapshotListener([room_id, my_client_id, session_start_ms, this](const QuerySnapshot& snapshot, Error error, const std::string& error_msg) {
+    messages_listener_reg_ = targeted_query.AddSnapshotListener([room_id, my_client_id, session_start_ms, this](const QuerySnapshot& snapshot, Error error, const std::string& error_msg) {
         if (error != kErrorOk) {
             SPDLOG_ERROR("Snapshot listener error: {}", error_msg);
             return;
@@ -338,14 +295,7 @@ void SignalingClient::ListenForTargetedMessages(const std::string& room_id, cons
                 SPDLOG_INFO("[Message Received] sender_id: [{}], target_id: [{}], my_client_id: [{}]", 
                             sender_id, target_id, my_client_id);
 
-                if (text_body == "SYSTEM_EVENT: ROOM_FULL_READY_FOR_WEBRTC") {
-                    if (!room_ready_fired_.exchange(true)) {
-                        if (room_ready_callback_) room_ready_callback_(room_id);
-                    }
-                    continue;
-                }
                 if (text_body == "SYSTEM_EVENT: Goodbye! I have closed my connection.") {
-                    room_ready_fired_ = false;
                     if (peer_left_callback_) peer_left_callback_(sender_id);
                     continue;
                 }
@@ -363,34 +313,12 @@ void SignalingClient::ListenForTargetedMessages(const std::string& room_id, cons
                         std::string mid, index_str, candidate_sdp;
                         std::getline(ss, mid, ':');
                         std::getline(ss, index_str, ':');
-                        std::getline(ss, candidate_sdp);
-                        ice_received_callback_(sender_id, mid, std::stoi(index_str), candidate_sdp);
+                        std::getline(ss, candidate_sdp, '\0');
+                        try {
+                            ice_received_callback_(sender_id, mid, std::stoi(index_str), candidate_sdp);
+                        } catch (...) {}
                     }
                     continue;
-                }
-            }
-        }
-    });
-
-    users_ref.Get().OnCompletion([room_id, my_client_id, this](const firebase::Future<QuerySnapshot>& future) {
-        if (future.status() == firebase::kFutureStatusComplete && !future.error()) {
-            auto snapshot = future.result();
-            size_t occupancy = snapshot->documents().size();
-
-            bool has_remote_peer = false;
-            for (const auto& doc_snap : snapshot->documents()) {
-                if (doc_snap.id() != my_client_id) {
-                    has_remote_peer = true;
-                    break;
-                }
-            }
-
-            if (occupancy >= 2 && has_remote_peer) {
-                if (!room_ready_fired_.exchange(true)) {
-                    SendTargetedMessage(room_id, my_client_id, "ALL", "SYSTEM_EVENT: ROOM_FULL_READY_FOR_WEBRTC");
-                    if (room_ready_callback_) {
-                        room_ready_callback_(room_id);
-                    }
                 }
             }
         }
@@ -409,113 +337,4 @@ void SignalingClient::SendTargetedMessage(const std::string& room_id, const std:
         {"timestamp", FieldValue::ServerTimestamp()}
     };
     messages_ref.Add(msg_map);
-}
-
-int SignalingClient::GetActiveClientCount(const std::string& room_id, const std::string& my_client_id) {
-    if (!db_ || room_id.empty()) return 0;
-    
-    auto active_users_promise = std::make_shared<std::promise<size_t>>();
-    std::future<size_t> active_users_future = active_users_promise->get_future();
-
-    CollectionReference users_ref = db_->Collection("rooms").Document(room_id).Collection("users");
-
-    users_ref.Get().OnCompletion([active_users_promise, my_client_id, this](const firebase::Future<QuerySnapshot>& future) {
-        if (future.status() != firebase::kFutureStatusComplete || future.error()) {
-            active_users_promise->set_value(0);
-            return;
-        }
-
-        auto snapshot = future.result();
-        const auto& docs = snapshot->documents();
-
-        int64_t ref_time_ms = static_cast<int64_t>(GetCurrentEpochMs());
-        std::vector<DocumentReference> docs_to_delete;
-        size_t active_count = 0;
-
-        for (const auto& doc : docs) {
-            std::string doc_id = doc.id();
-            if (!my_client_id.empty() && doc_id == my_client_id) {
-                continue;
-            }
-
-            MapFieldValue data = doc.GetData();
-            bool is_stale = true;
-
-            if (data.find("lastSeen") != data.end()) {
-                const FieldValue& val = data["lastSeen"];
-                if (!val.is_null()) {
-                    int64_t last_seen = ExtractEpochMs(val);
-                    int64_t diff = ref_time_ms - last_seen;
-                    if (std::abs(diff) < 30000) {
-                        is_stale = false;
-                    }
-                }
-            }
-
-            if (is_stale) {
-                SPDLOG_WARN("[Active Count] Purging stale client document: {}", doc_id);
-                docs_to_delete.push_back(doc.reference());
-            } else {
-                active_count++;
-            }
-        }
-
-        auto finalize_count = [active_users_promise, active_count]() {
-            active_users_promise->set_value(active_count);
-        };
-
-        if (!docs_to_delete.empty()) {
-            auto counter = std::make_shared<std::atomic<int>>(static_cast<int>(docs_to_delete.size()));
-            for (auto doc_ref : docs_to_delete) {
-                doc_ref.Delete().OnCompletion([counter, finalize_count](const firebase::Future<void>& del_future) {
-                    if (--(*counter) == 0) {
-                        finalize_count();
-                    }
-                });
-            }
-        } else {
-            finalize_count();
-        }
-    });
-
-    if (active_users_future.wait_for(std::chrono::seconds(5)) == std::future_status::ready) {
-        return static_cast<int>(active_users_future.get());
-    }
-    return 0;
-}
-
-bool SignalingClient::IsRoomEmpty(const std::string& room_id, const std::string& my_client_id) {
-    int count = GetActiveClientCount(room_id, my_client_id);
-    SPDLOG_INFO("[Room Check] Room [{}] other active client count: {}", room_id, count);
-    return (count == 0);
-}
-
-
-
-void SignalingClient::StopHeartbeat() {
-    heartbeat_active_ = false;
-    std::unique_ptr<std::thread> old_thread;
-    {
-        std::lock_guard<std::mutex> lock(heartbeat_mutex_);
-        old_thread = std::move(heartbeat_thread_);
-    }
-    if (old_thread && old_thread->joinable()) {
-        try {
-            old_thread->join();
-        } catch (...) {}
-    }
-}
-
-void SignalingClient::StartHeartbeat(const std::string& room_id, const std::string& my_client_id) {
-    StopHeartbeat();
-    std::lock_guard<std::mutex> lock(heartbeat_mutex_);
-    heartbeat_active_ = true;
-    heartbeat_thread_ = std::make_unique<std::thread>([room_id, my_client_id, this]() {
-        while (heartbeat_active_) {
-            SetUserPresence(room_id, my_client_id, true);
-            for (int i = 0; i < 100 && heartbeat_active_; ++i) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
-        }
-    });
 }
