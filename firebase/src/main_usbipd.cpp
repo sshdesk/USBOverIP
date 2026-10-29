@@ -90,8 +90,14 @@ void AttachDataChannelCallback(WebRtcManager_usbipd* manager) {
         is_datachannel_connected = is_open;
         if (is_open) {
             SPDLOG_INFO("[Heartbeat Manager] DataChannel opened. Pausing Firebase polling & switching to 500ms loop.");
+            if (signaling_client) {
+                signaling_client->StopHeartbeat();
+            }
         } else {
             SPDLOG_WARN("[Heartbeat Manager] DataChannel closed. Resuming Firebase polling & switching to 30ms loop.");
+            if (signaling_client && !active_room_id.empty() && !global_client_id.empty()) {
+                signaling_client->StartHeartbeat(active_room_id, global_client_id);
+            }
         }
     });
 }
@@ -130,7 +136,9 @@ int main(int argc, char *argv[]) {
 
     rtc::LogMessage::LogToDebug(rtc::LoggingSeverity::LS_ERROR);
 
-    SetupLogging("info");
+    // Initialize the global signaling client singleton
+    signaling_client = std::make_unique<SignalingClient>();
+    signaling_client->SetupLogging("info");
     std::srand(static_cast<unsigned int>(std::time(nullptr)));
 
     std::signal(SIGINT, SignalExitHandler);
@@ -138,7 +146,7 @@ int main(int argc, char *argv[]) {
 
     global_client_id = "cpp_peer_" + std::to_string(std::rand() % 90000 + 1000);
 
-    if (!InitializeFirebaseFramework()) {
+    if (!signaling_client->InitializeFramework()) {
         SPDLOG_ERROR("Firebase setup crash exception encountered.");
         return -1;
     }
@@ -147,7 +155,7 @@ int main(int argc, char *argv[]) {
 
     std::string saved_room_id = "";
     std::string saved_log_level = "info";
-    LoadConfigFromDisk(saved_room_id, saved_log_level);
+    signaling_client->LoadConfigFromDisk(saved_room_id, saved_log_level);
 
     std::string input_room;
     if (!saved_room_id.empty()) {
@@ -167,21 +175,21 @@ int main(int argc, char *argv[]) {
     }
 
     if (input_room.empty()) {
-        active_room_id = GenerateRandomRoomId(20);
+        active_room_id = signaling_client->GenerateRandomRoomId(20);
         host_server = true; 
         SPDLOG_INFO("[Room Creation] Generated fresh room key and set role to Host Server: {}", active_room_id);
     } else {
         active_room_id = input_room;
-        host_server = IsRoomEmpty(active_room_id); 
+        host_server = signaling_client->IsRoomEmpty(active_room_id, global_client_id); 
         SPDLOG_INFO("[Room Join] Target room ID: {}. Assigned Role -> {}", active_room_id, host_server ? "Host Server" : "Client");
     }
 
-    SaveConfigToDisk(active_room_id, "info");
+    signaling_client->SaveConfigToDisk(active_room_id, "info");
 
     SPDLOG_INFO("Evaluating capacity constraints for room matrix [{}]...", active_room_id);
-    if (!VerifyAndReserveRoomCapacity(active_room_id)) {
+    if (!signaling_client->VerifyAndReserveRoomCapacity(active_room_id, global_client_id)) {
         std::cout << "\n[CRITICAL REJECT] Access Denied: Room capacity limit reached.\n" << std::endl;
-        ShutdownFirebaseFramework(nullptr);
+        signaling_client->ShutdownFramework();
         return -1;
     }
 
@@ -203,13 +211,13 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    RegisterOnRoomReadyEvent([&](const std::string& ready_room_id) {
+    signaling_client->RegisterOnRoomReadyEvent([&](const std::string& ready_room_id) {
         SPDLOG_WARN("=================================================================");
         SPDLOG_WARN("[EVENT TRIGGERED] Room [{}] is full and ready for meeting!", ready_room_id);
         SPDLOG_WARN("=================================================================");
     });
 
-    RegisterOnPeerLeftEvent([&](const std::string& peer_client_id) {
+    signaling_client->RegisterOnPeerLeftEvent([&](const std::string& peer_client_id) {
         SPDLOG_ERROR("=================================================================");
         SPDLOG_ERROR("[EVENT NOTICE] Peer [{}] has disconnected or left the room.", peer_client_id);
         SPDLOG_ERROR("=================================================================");
@@ -233,7 +241,7 @@ int main(int argc, char *argv[]) {
         }
     });
 
-    RegisterOnSdpReceivedEvent([&](const std::string& sender_id, const std::string& type, const std::string& sdp) {
+    signaling_client->RegisterOnSdpReceivedEvent([&](const std::string& sender_id, const std::string& type, const std::string& sdp) {
         SPDLOG_INFO("[Signaling Event] Received remote SDP {} from peer: {}", type, sender_id);
         if (sender_id == global_client_id) return;
 
@@ -258,7 +266,7 @@ int main(int argc, char *argv[]) {
         }
     });
 
-    RegisterOnIceReceivedEvent([&](const std::string& sender_id, const std::string& mid, int mline_index, const std::string & sdp) {
+    signaling_client->RegisterOnIceReceivedEvent([&](const std::string& sender_id, const std::string& mid, int mline_index, const std::string & sdp) {
         SPDLOG_INFO("[Signaling Event] Received remote ICE candidate (sdpMid: {}, sdpMLineIndex: {}) from peer: {}", mid, mline_index, sender_id);
         if (sender_id == global_client_id) return;
 
@@ -277,8 +285,8 @@ int main(int argc, char *argv[]) {
         }
     });
 
-    SetUserPresence(active_room_id, global_client_id, true);
-    ListenForTargetedMessages(active_room_id, global_client_id);
+   
+    signaling_client->ListenForTargetedMessages(active_room_id, global_client_id);
 
     std::cout << "\n=======================================================" << std::endl;
     std::cout << "MESSAGE FORMAT RULES:" << std::endl;
@@ -307,16 +315,7 @@ int main(int argc, char *argv[]) {
         int sleep_ms = is_datachannel_connected ? 500 : 30;
         std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
 
-        if (is_datachannel_connected) {
-            last_heartbeat_time = std::chrono::steady_clock::now();
-        } else {
-            auto now = std::chrono::steady_clock::now();
-            if ( sleep_ms == 30 && std::chrono::duration_cast<std::chrono::seconds>(now - last_heartbeat_time).count() >= 5) {
-                SetUserPresence(active_room_id, global_client_id, true);
-                last_heartbeat_time = now;
-            }
-        }
-
+ 
         std::string active_msg = "";
         {
             std::lock_guard<std::mutex> lock(input_mutex);
@@ -338,7 +337,9 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    HandleGracefulExit(active_room_id, global_client_id);
+    if (signaling_client) {
+        signaling_client->HandleGracefulExit(active_room_id, global_client_id);
+    }
 
     if (core_server_connection) {
         core_server_connection->ShutdownConnection();
@@ -367,6 +368,8 @@ int main(int argc, char *argv[]) {
 
     std::this_thread::sleep_for(std::chrono::milliseconds(40));
 
-    ShutdownFirebaseFramework(nullptr);
+    if (signaling_client) {
+        signaling_client->ShutdownFramework();
+    }
     return 0;
 }

@@ -293,6 +293,9 @@ void WebRtcManager_usbipd::InternalDataChannelObserver::OnMessage(const webrtc::
         std::string msg(reinterpret_cast<const char*> (buffer.data.data()), buffer.data.size());
         SPDLOG_INFO("[DATA CHANNEL RECEIVED BUFFER]: {}", msg);
     }
+
+    //SPDLOG_INFO("[DATA CHANNEL RECEIVED BUFFER]: {}", buffer.data.size());
+    //manager_.data_channel_->Send(buffer);
 }
 
 bool WebRtcManager_usbipd::IsDataChannelOpen() const {

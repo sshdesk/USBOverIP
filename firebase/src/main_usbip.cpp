@@ -68,21 +68,48 @@ void SignalExitHandler(int signum) {
 
 void AttachDataChannelCallback(WebRtcManager_usbip* manager) {
     if (!manager) return;
-    manager->SetDataChannelStateCallback([](bool is_open) {
+
+    manager->SetDataChannelStateCallback([manager](bool is_open) {
         is_datachannel_connected = is_open;
+
         if (is_open) {
-            SPDLOG_INFO("[Heartbeat Manager] DataChannel opened. Pausing Firebase polling & switching to 500ms loop.");
-            if (core_server_connection && core_server_connection->GetDataChannel()) {
+            SPDLOG_INFO("[Tunnel Manager] DataChannel opened. Linking to TCP tunnel manager...");
+
+            if (signaling_client) {
+                signaling_client->StopHeartbeat();
+            }
+
+            // Retrieve DataChannel and signaling thread directly from the triggering manager instance
+            auto dc = manager->GetDataChannel();
+            auto* sig_thread = manager->GetSignalingThread();
+
+            if (!dc || !sig_thread) {
+                SPDLOG_ERROR("[Tunnel Manager] DataChannel or signaling thread is null on open callback.");
+                return;
+            }
+
+            // Retain ref-counted DataChannel and pass to background task safely
+            std::thread([dc, sig_thread]() {
                 if (!tunnel_manager.Start()) {
                     SPDLOG_ERROR("Failed to start tunnel manager because TCP bind failed.");
-                } else {
-                    SPDLOG_INFO("Caller DataChannel linked. Linking to TCP tunnel manager...");
-                    tunnel_manager.HandleDataChannel(core_server_connection->GetDataChannel(), core_server_connection->GetSignalingThread());
+                    return;
                 }
-            }
+
+                SPDLOG_INFO("DataChannel linked. Binding to TCP tunnel manager...");
+                tunnel_manager.HandleDataChannel(dc, sig_thread);
+            }).detach();
+
         } else {
-            SPDLOG_WARN("[Heartbeat Manager] DataChannel closed. Resuming Firebase polling & switching to 30ms loop.");
+            SPDLOG_WARN("[Tunnel Manager] DataChannel closed. Stopping TCP tunnel manager...");
+
+            // Release TCP port binding so future reconnect attempts do not fail with bind errors
             tunnel_manager.Stop();
+
+            // Only resume signaling heartbeat if the room session is still active
+            if (signaling_client && !active_room_id.empty() && !global_client_id.empty()) {
+                SPDLOG_WARN("[Heartbeat Manager] Resuming signaling heartbeat.");
+                signaling_client->StartHeartbeat(active_room_id, global_client_id);
+            }
         }
     });
 }
@@ -244,7 +271,6 @@ void init(CLI::App &app)
         app.require_subcommand(1);
 }
 
-// Keep a single persistent CLI app instance to avoid repeated dynamic allocations and destructor crashes
 CLI::App& get_usbip_app() {
     static CLI::App app("USB/IP Client & WebRTC Tunnel Utility");
     static bool initialized = false;
@@ -279,7 +305,7 @@ int usbipCLI(int argc, wchar_t *argv[]) {
     }
 
     CLI::App &app = get_usbip_app();
-    app.clear(); // Reset subcommand states and parsed values for the new invocation
+    app.clear();
 
     try {
         app.parse(argc, argv);
@@ -291,9 +317,10 @@ int usbipCLI(int argc, wchar_t *argv[]) {
 }
 
 int wmain(int argc, wchar_t *argv[]) {
-    SetupLogging("info");
-    std::srand(static_cast<unsigned int>(std::time(nullptr)));
+    signaling_client = std::make_unique<SignalingClient>();
+    signaling_client->SetupLogging("info");
 
+    std::srand(static_cast<unsigned int>(std::time(nullptr)));
     rtc::LogMessage::LogToDebug(rtc::LoggingSeverity::LS_ERROR);
 
     std::signal(SIGINT, SignalExitHandler);
@@ -301,7 +328,7 @@ int wmain(int argc, wchar_t *argv[]) {
 
     global_client_id = "cpp_peer_" + std::to_string(std::rand() % 90000 + 1000);
 
-    if (!InitializeFirebaseFramework()) {
+    if (!signaling_client->InitializeFramework()) {
         SPDLOG_ERROR("Firebase setup crash exception encountered.");
         return -1;
     }
@@ -310,7 +337,7 @@ int wmain(int argc, wchar_t *argv[]) {
 
     std::string saved_room_id = "";
     std::string saved_log_level = "info";
-    LoadConfigFromDisk(saved_room_id, saved_log_level);
+    signaling_client->LoadConfigFromDisk(saved_room_id, saved_log_level);
 
     std::string input_room;
     if (!saved_room_id.empty()) {
@@ -330,21 +357,21 @@ int wmain(int argc, wchar_t *argv[]) {
     }
 
     if (input_room.empty()) {
-        active_room_id = GenerateRandomRoomId(20);
+        active_room_id = signaling_client->GenerateRandomRoomId(20);
         host_server = true; 
         SPDLOG_INFO("[Room Creation] Generated fresh room key and set role to Host Server: {}", active_room_id);
     } else {
         active_room_id = input_room;
-        host_server = IsRoomEmpty(active_room_id); 
+        host_server = signaling_client->IsRoomEmpty(active_room_id, global_client_id); 
         SPDLOG_INFO("[Room Join] Target room ID: {}. Assigned Role -> {}", active_room_id, host_server ? "Host Server" : "Client");
     }
 
-    SaveConfigToDisk(active_room_id, "info");
+    signaling_client->SaveConfigToDisk(active_room_id, "info");
 
     SPDLOG_INFO("Evaluating capacity constraints for room matrix [{}]...", active_room_id);
-    if (!VerifyAndReserveRoomCapacity(active_room_id)) {
+    if (!signaling_client->VerifyAndReserveRoomCapacity(active_room_id, global_client_id)) {
         std::cout << "\n[CRITICAL REJECT] Access Denied: Room capacity limit reached.\n" << std::endl;
-        ShutdownFirebaseFramework(nullptr);
+        signaling_client->ShutdownFramework();
         return -1;
     }
 
@@ -358,13 +385,13 @@ int wmain(int argc, wchar_t *argv[]) {
         }
     }
 
-    RegisterOnRoomReadyEvent([&](const std::string& ready_room_id) {
+    signaling_client->RegisterOnRoomReadyEvent([&](const std::string& ready_room_id) {
         SPDLOG_WARN("=================================================================");
         SPDLOG_WARN("[EVENT TRIGGERED] Room [{}] is full and ready for meeting!", ready_room_id);
         SPDLOG_WARN("=================================================================");
     });
 
-    RegisterOnPeerLeftEvent([&](const std::string& peer_client_id) {
+    signaling_client->RegisterOnPeerLeftEvent([&](const std::string& peer_client_id) {
         SPDLOG_ERROR("=================================================================");
         SPDLOG_ERROR("[EVENT NOTICE] Peer [{}] has disconnected or left the room.", peer_client_id);
         SPDLOG_ERROR("=================================================================");
@@ -388,7 +415,7 @@ int wmain(int argc, wchar_t *argv[]) {
         }
     });
 
-    RegisterOnSdpReceivedEvent([&](const std::string& sender_id, const std::string& type, const std::string& sdp) {
+    signaling_client->RegisterOnSdpReceivedEvent([&](const std::string& sender_id, const std::string& type, const std::string& sdp) {
         SPDLOG_INFO("[Signaling Event] Received remote SDP {} from peer: {}", type, sender_id);
         if (sender_id == global_client_id) return;
 
@@ -413,7 +440,7 @@ int wmain(int argc, wchar_t *argv[]) {
         }
     });
 
-    RegisterOnIceReceivedEvent([&](const std::string& sender_id, const std::string& mid, int mline_index, const std::string & sdp) {
+    signaling_client->RegisterOnIceReceivedEvent([&](const std::string& sender_id, const std::string& mid, int mline_index, const std::string & sdp) {
         SPDLOG_INFO("[Signaling Event] Received remote ICE candidate (sdpMid: {}, sdpMLineIndex: {}) from peer: {}", mid, mline_index, sender_id);
         if (sender_id == global_client_id) return;
 
@@ -432,8 +459,8 @@ int wmain(int argc, wchar_t *argv[]) {
         }
     });
 
-    SetUserPresence(active_room_id, global_client_id, true);
-    ListenForTargetedMessages(active_room_id, global_client_id);
+    signaling_client->SetUserPresence(active_room_id, global_client_id, true);
+    signaling_client->ListenForTargetedMessages(active_room_id, global_client_id);
 
     std::cout << "\n=======================================================" << std::endl;
     std::cout << "Waiting for Peer-to-Peer WebRTC connection to establish..." << std::endl;
@@ -444,8 +471,8 @@ int wmain(int argc, wchar_t *argv[]) {
     while (keep_running && !is_datachannel_connected) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         auto now = std::chrono::steady_clock::now();
-        if (/*sleep_ms == 30 &&*/ std::chrono::duration_cast<std::chrono::seconds>(now - last_heartbeat_time).count() >= 5) {
-            SetUserPresence(active_room_id, global_client_id, true);
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - last_heartbeat_time).count() >= 5) {
+            signaling_client->SetUserPresence(active_room_id, global_client_id, true);
             last_heartbeat_time = now;
         }
     }
@@ -497,7 +524,9 @@ int wmain(int argc, wchar_t *argv[]) {
         }
     }
 
-    HandleGracefulExit(active_room_id, global_client_id);
+    if (signaling_client) {
+        signaling_client->HandleGracefulExit(active_room_id, global_client_id);
+    }
     tunnel_manager.Stop();
 
     // Ensure 'detach -a' is called before exiting the application
@@ -530,6 +559,9 @@ int wmain(int argc, wchar_t *argv[]) {
     }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(40));
-    ShutdownFirebaseFramework(nullptr);
+    if (signaling_client) {
+        signaling_client->ShutdownFramework();
+        signaling_client.reset();
+    }
     return EXIT_SUCCESS;
 }
