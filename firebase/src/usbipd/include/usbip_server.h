@@ -15,7 +15,7 @@ typedef struct ring_buffer         ring_buffer_t;
 struct usbip_server_t {
     usb_device_t         *devices[MAX_DEVICES];
     int                   num_devices;
-    bool          dynamic_devices; /* enumerate on DEVLIST; capture on IMPORT */
+    bool                  dynamic_devices; /* enumerate on DEVLIST; capture on IMPORT */
     volatile bool         running;
 
     rtc_peer_connection_t *peer_connection;
@@ -26,6 +26,8 @@ struct usbip_server_t {
     CRITICAL_SECTION       lock;
     HANDLE                 worker_thread;
     volatile bool          worker_running;
+
+    char                  active_import_busids[MAX_DEVICES][SYSFS_BUS_ID_SIZE];
 };
 
 typedef struct usbip_server_t usbip_server_t;

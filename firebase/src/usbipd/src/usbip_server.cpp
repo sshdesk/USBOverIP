@@ -129,6 +129,31 @@ static int send_custom_status_rtc(usbip_server_t *server, uint32_t command, uint
     return send_exact_rtc(server, reply, sizeof(reply));
 }
 
+static bool dynamic_busid_exists(const char *busid) {
+    usb_physical_device_info_t physical[USB_PHYSICAL_DEVICE_MAX];
+    int count = usb_device_enumerate_physical_devices(physical, USB_PHYSICAL_DEVICE_MAX);
+    for (int i = 0; i < count; ++i) {
+        if (strcmp(physical[i].busid, busid) == 0) return true;
+    }
+    return false;
+}
+
+/* Locate a session by BUSID while holding server lock. */
+static int find_import_session_slot(usbip_server_t *server, const char *busid) {
+    for (int i = 0; i < MAX_DEVICES; ++i) {
+        if (server->active_import_busids[i][0] &&
+            strcmp(server->active_import_busids[i], busid) == 0) return i;
+    }
+    return -1;
+}
+
+static int find_free_import_session_slot(usbip_server_t *server) {
+    for (int i = 0; i < MAX_DEVICES; ++i) {
+        if (!server->active_import_busids[i][0]) return i;
+    }
+    return -1;
+}
+
 static void remove_device_from_registry(usbip_server_t *server, usb_device_t *dev) {
     for (int i = 0; i < server->num_devices; ++i) {
         if (server->devices[i] == dev) {
@@ -137,6 +162,30 @@ static void remove_device_from_registry(usbip_server_t *server, usb_device_t *de
             server->devices[--server->num_devices] = NULL;
             return;
         }
+    }
+}
+
+/* Release only this import's session record and capture. */
+static void cleanup_import_session(usbip_server_t *server, usb_device_t *dev) {
+    char session_busid[SYSFS_BUS_ID_SIZE];
+    strncpy(session_busid, dev->busid, sizeof(session_busid) - 1);
+    session_busid[sizeof(session_busid) - 1] = '\0';
+    bool destroy_device = server->dynamic_devices;
+
+    EnterCriticalSection(&server->lock);
+    dev->attached = false;
+    if (server->dynamic_devices) {
+        remove_device_from_registry(server, dev);
+    }
+    int slot = find_import_session_slot(server, session_busid);
+    if (slot >= 0) {
+        server->active_import_busids[slot][0] = '\0';
+    }
+    LeaveCriticalSection(&server->lock);
+
+    if (destroy_device) {
+        usb_device_destroy(dev);
+        SPDLOG_INFO("[USB/IP WebRTC] Capture for device released after session detach.");
     }
 }
 
@@ -328,6 +377,9 @@ static int handle_urb_transfer_loop(usbip_server_t *server, usb_device_t *dev) {
             ret.ep            = htonl(ep);
             ret.status        = htonl((uint32_t)status);
             ret.actual_length = htonl(status == 0 ? actual_length : 0);
+            ret.start_frame   = htonl(0);
+            ret.number_of_packets = htonl(0);
+            ret.error_count   = htonl(0);
 
             if (send_exact_rtc(server, &ret, sizeof(ret)) != 0) {
                 break;
@@ -370,7 +422,6 @@ static int handle_urb_transfer_loop(usbip_server_t *server, usb_device_t *dev) {
     bool release_capture = false;
     EnterCriticalSection(&server->lock);
     dev->attached = false;
-    //dev->active_socket = 0;
     release_capture = dev->detach_requested;
     if (release_capture) {
         SPDLOG_INFO("[USB/IP WebRTC] Explicit DETACH: releasing captured device {}.", dev->busid);
@@ -525,22 +576,34 @@ static int handle_op_import(usbip_server_t *server, const usbip_op_common_t *hdr
         return -1;
     }
 
+    int session_slot = find_free_import_session_slot(server);
+    if (session_slot < 0) {
+        LeaveCriticalSection(&server->lock);
+        rep.status = htonl(ST_DEV_BUSY);
+        (void)send_exact_rtc(server, &rep, sizeof(rep));
+        return -1;
+    }
+
     dev->reserved = false;
     dev->reserved_at_ms = 0;
     dev->detach_requested = false;
     dev->attached = true;
+    strncpy(server->active_import_busids[session_slot], busid,
+            sizeof(server->active_import_busids[session_slot]) - 1);
+    server->active_import_busids[session_slot][sizeof(server->active_import_busids[session_slot]) - 1] = '\0';
+
     usb_device_fill_op_info(dev, &rep.udev);
     rep.status = htonl(ST_OK);
     LeaveCriticalSection(&server->lock);
 
     if (send_exact_rtc(server, &rep, sizeof(rep)) != 0) {
-        EnterCriticalSection(&server->lock);
-        dev->attached = false;
-        LeaveCriticalSection(&server->lock);
+        cleanup_import_session(server, dev);
         return -1;
     }
 
-    return handle_urb_transfer_loop(server, dev);
+    int transfer_result = handle_urb_transfer_loop(server, dev);
+    cleanup_import_session(server, dev);
+    return transfer_result;
 }
 
 static DWORD WINAPI web_rtc_worker_thread(LPVOID lpParam) {
@@ -601,13 +664,28 @@ static DWORD WINAPI web_rtc_worker_thread(LPVOID lpParam) {
 }
 
 usbip_server_t *usbip_server_create(void) {
+#ifdef _WIN32
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        return NULL;
+    }
+#endif
+
     usbip_server_t *server = (usbip_server_t *)calloc(1, sizeof(usbip_server_t));
-    if (!server) return NULL;
+    if (!server) {
+#ifdef _WIN32
+        WSACleanup();
+#endif
+        return NULL;
+    }
 
     server->running = false;
     server->client_connected = false;
     server->rx_buffer = ring_buffer_create(1024 * 1024);
     InitializeCriticalSection(&server->lock);
+    for (int i = 0; i < MAX_DEVICES; ++i) {
+        server->active_import_busids[i][0] = '\0';
+    }
     
     return server;
 }
@@ -621,6 +699,9 @@ void usbip_server_destroy(usbip_server_t *server) {
         DeleteCriticalSection(&server->lock);
         ring_buffer_destroy(server->rx_buffer);
         free(server);
+#ifdef _WIN32
+        WSACleanup();
+#endif
     }
 }
 
