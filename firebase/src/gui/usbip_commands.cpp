@@ -425,6 +425,7 @@ void UsbIpCommands::shutdownTunnel() {
 }
 
 void UsbIpCommands::shutdown() {
+    executeCommand({"detach", "-a"});
     if (signaling_client && !active_room_id.empty()) {
         signaling_client->HandleGracefulExit(active_room_id, global_client_id);
     }

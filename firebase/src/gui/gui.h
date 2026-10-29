@@ -15,6 +15,7 @@ struct UIState {
     std::string labelText = "No item selected";
     int scrollY = 0;
     int pressedButton = 0; // 0: None, 1: LocalUSB, 2: RemoteUSB, 3: RemoteAttach, 4: RemoteDetach, 5: Log
+    bool buttonsEnabled = true; // Tracks whether buttons accept input and render as enabled
 };
 
 class GUI {
@@ -36,6 +37,7 @@ public:
     void setLogHandler(ButtonHandler handler)          { log_handler_ = handler; }
 
     void setLabelText(const std::string& text) { state.labelText = text; }
+    void setButtonsEnabled(bool enabled) { state.buttonsEnabled = enabled; }
 
     std::string getSelectedItem() const {
         if (state.selectedIndex >= 0 && state.selectedIndex < static_cast<int>(state.listItems.size())) {

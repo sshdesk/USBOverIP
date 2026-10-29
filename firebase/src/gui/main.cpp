@@ -20,6 +20,7 @@
 
 std::atomic<bool> keep_running{true};
 std::atomic<bool> is_datachannel_connected{false};
+std::atomic<bool> is_usbip_busy{false}; 
 std::string active_room_id = ""; 
 std::string global_client_id = "";
 
@@ -31,68 +32,6 @@ static bool is_session_starting = false;
 // Subsystem Controller Instances
 static UsbIpCommands *g_usbip = nullptr;
 static UsbIpdCommands *g_usbipd = nullptr;
-
-// void FetchAndDisplayRemoteDevices(GUI &gui) {
-//     std::string temp_file = "usbip_devices_temp.txt";
-
-//     FILE *fp = nullptr;
-//     if (freopen_s(&fp, temp_file.c_str(), "w", stdout) != 0) {
-//         SPDLOG_ERROR("Failed to redirect stdout for device listing.");
-//         return;
-//     }
-
-//     //execute_usbip_command({"usbip", "list", "-r", "127.0.0.1"});
-
-//     if (g_usbip) {
-//              g_usbip->executeCommand({"list", "-r", "127.0.0.1"});
-//     }
-
-//     fflush(stdout);
-//     if (fp) {
-//         fclose(fp);
-//     }
-
-//     std::ifstream infile(temp_file);
-//     std::string line;
-
-//     gui.clearListItems();
-//     gui.addListItem("--- Select a Device to Attach ---");
-
-//     std::string current_busid = "";
-//     std::string current_desc = "";
-
-//     while (std::getline(infile, line)) {
-//         if (!line.empty() && line.back() == '\r') {
-//             line.pop_back();
-//         }
-
-//         // Check if line starts with a bus ID pattern (e.g., "   1-10    : ")
-//         size_t colon_pos = line.find(" : ");
-//         if (colon_pos != std::string::npos &&
-//             line.find("/sys/") == std::string::npos &&
-//             line.find("Type:") == std::string::npos) {
-            
-//             if (!current_busid.empty()) {
-//                 std::string formatted_item = "[" + current_busid + "] " + current_desc;
-//                 gui.addListItem(formatted_item);
-//                 SPDLOG_INFO("[Parsed Device] {}", formatted_item);
-//             }
-
-//             std::stringstream ss(line);
-//             ss >> current_busid;
-//             current_desc = line.substr(colon_pos + 3);
-//         }
-//     }
-
-//     if (!current_busid.empty()) {
-//         std::string formatted_item = "[" + current_busid + "] " + current_desc;
-//         gui.addListItem(formatted_item);
-//         SPDLOG_INFO("[Parsed Device] {}", formatted_item);
-//     }
-
-//     infile.close();
-// }
-
 
 void FetchAndDisplayRemoteDevices(GUI &gui) {
     std::string temp_file = "usbip_devices_temp.txt";
@@ -127,37 +66,31 @@ void FetchAndDisplayRemoteDevices(GUI &gui) {
             line.pop_back();
         }
 
-        // Find the first non-whitespace character
         size_t first_char_idx = line.find_first_not_of(" \t");
         if (first_char_idx == std::string::npos) {
             continue;
         }
 
-        // Continuation lines start with ':', headers start with '-' or '='
         char c = line[first_char_idx];
         if (c == ':' || c == '-' || c == '=') {
             continue;
         }
 
-        // Look for the colon separating the Bus ID from the description
         size_t first_colon = line.find(':', first_char_idx);
         if (first_colon == std::string::npos) {
-            continue; // Skip lines without colons (e.g., "Exportable USB devices")
+            continue; 
         }
 
-        // Extract and clean the Bus ID (e.g., "1-1" or "1-10")
         std::string busid = line.substr(first_char_idx, first_colon - first_char_idx);
         size_t busid_end = busid.find_last_not_of(" \t");
         if (busid_end != std::string::npos) {
             busid = busid.substr(0, busid_end + 1);
         }
 
-        // Valid bus IDs contain no internal spaces
         if (busid.empty() || busid.find(' ') != std::string::npos) {
             continue;
         }
 
-        // Extract full description after the bus ID colon (Vendor : Product (VID:PID))
         std::string desc = line.substr(first_colon + 1);
         size_t desc_start = desc.find_first_not_of(" \t");
         if (desc_start != std::string::npos) {
@@ -171,7 +104,6 @@ void FetchAndDisplayRemoteDevices(GUI &gui) {
             desc = desc.substr(0, desc_end + 1);
         }
 
-        // Format as a single line entry
         std::string formatted_item = "[" + busid + "] " + desc;
         gui.addListItem(formatted_item);
         SPDLOG_INFO("[Parsed Device] {}", formatted_item);
@@ -180,8 +112,6 @@ void FetchAndDisplayRemoteDevices(GUI &gui) {
     infile.close();
 }
 
-
-// Register tunnel callbacks once globally to prevent callback stacking
 void InitializeTunnelCallbacks() {
     if (!g_usbip || !g_usbip->getTunnelManager()) {
         SPDLOG_ERROR("Cannot initialize callbacks: g_usbip or tunnel_manager is null.");
@@ -260,25 +190,20 @@ int main(int argc, char* argv[]) {
         if (!g_usbip) {
             g_usbip = new UsbIpCommands();
         }
-
-        // If the data channel is already active, refresh and list remote devices asynchronously
-        // if (is_datachannel_connected) {
-        //     std::thread([](GUI& gui) {
-        //         if (is_datachannel_connected) {
-        //             gui.setLabelText("Data channel connected");
-        //             SPDLOG_INFO("Querying remote USB/IP server device list...");
-        //             FetchAndDisplayRemoteDevices(gui);
-        //         }
-        //     }, std::ref(target_gui)).detach();
-        //     return;
-        // }
+        else
+        {
+          target_gui.clearListItems();
+          target_gui.addListItem("Press detach button first");
+          return;
+        }
 
         target_gui.clearListItems();
         target_gui.addListItem("Initializing WebRTC tunnel to remote host...");
 
-        // Initialize tunnel callbacks once to prevent callback stacking
-        static std::once_flag callbacks_flag;
-        std::call_once(callbacks_flag, []() { InitializeTunnelCallbacks(); });
+        //static std::once_flag callbacks_flag;
+        //std::call_once(callbacks_flag, []() {  });
+
+        InitializeTunnelCallbacks();
 
         int ret = g_usbip->initializeTunnelSession();
         if (ret < 0) {
@@ -287,8 +212,13 @@ int main(int argc, char* argv[]) {
         }
     });
 
-    // 3. Attach
+    // 3. Attach (Non-blocking background thread with UI locking)
     gui.setRemoteAttachHandler([](GUI& target_gui) {
+        if (is_usbip_busy) {
+            target_gui.setLabelText("An operation is already in progress...");
+            return;
+        }
+
         std::string selected = target_gui.getSelectedItem();
         if (selected.empty() || selected.find("---") != std::string::npos) return;
 
@@ -296,20 +226,48 @@ int main(int argc, char* argv[]) {
         size_t end = selected.find(']');
         if (start != std::string::npos && end != std::string::npos && end > start + 1) {
             std::string busid = selected.substr(start + 1, end - start - 1);
-            if (g_usbip) {
-                g_usbip->executeCommand({"attach", "-r", "127.0.0.1", "-b", busid});
-                attach_triggered = true;
-                target_gui.setLabelText("Attached device " + busid + " successfully");
-            }
+            
+            is_usbip_busy = true;
+            target_gui.setButtonsEnabled(false); // Dim and disable buttons
+            target_gui.setLabelText("Attaching device " + busid + "...");
+
+            std::thread([busid, &target_gui]() {
+                if (g_usbip) {
+                    g_usbip->executeCommand({"attach", "-r", "127.0.0.1", "-b", busid});
+                    attach_triggered = true;
+                }
+                is_usbip_busy = false;
+                target_gui.setButtonsEnabled(true); // Re-enable buttons and restore colors
+            }).detach();
         }
     });
 
-    // 4. Detach
+    // 4. Detach (Non-blocking background thread with UI locking)
     gui.setRemoteDetachHandler([](GUI& target_gui) {
-        if (g_usbip) {
-            g_usbip->executeCommand({"detach", "-a"});
-            target_gui.setLabelText("All remote USB devices detached");
+        if (is_usbip_busy) {
+            target_gui.setLabelText("An operation is already in progress...");
+            return;
         }
+
+        is_usbip_busy = true;
+        target_gui.setButtonsEnabled(false); // Dim and disable buttons
+        target_gui.setLabelText("Detaching all remote USB devices...");
+
+        if (remote_usb_triggered && g_usbip) {
+          g_usbip->shutdown();
+          delete g_usbip;
+          g_usbip = nullptr;
+        }
+        is_usbip_busy = false;
+        target_gui.setButtonsEnabled(true);
+        
+        //std::thread([&target_gui]() {
+        //    if (g_usbip) {
+        //        g_usbip->executeCommand({"detach", "-a"});
+        //    }
+        //    is_usbip_busy = false;
+        //    target_gui.setButtonsEnabled(true); // Re-enable buttons and restore colors
+        //}).detach();
     });
 
     // 5. Logs

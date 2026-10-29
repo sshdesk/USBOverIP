@@ -120,46 +120,44 @@ void GUI::handleEvents(bool& running) {
                     SDL_StopTextInput();
                 }
 
-       
-                if (mx >= localUsbBtnRect.x && mx <= localUsbBtnRect.x + localUsbBtnRect.w &&
-                    my >= localUsbBtnRect.y && my <= localUsbBtnRect.y + localUsbBtnRect.h) {
-                    state.pressedButton = 1;
-                    state.listItems.clear();
-                    state.selectedIndex = -1;
-                    if (local_usb_handler_) {
-                        local_usb_handler_(*this);
-                    }    
-                }
-        
-                else if (mx >= remoteUsbBtnRect.x && mx <= remoteUsbBtnRect.x + remoteUsbBtnRect.w &&
-                         my >= remoteUsbBtnRect.y && my <= remoteUsbBtnRect.y + remoteUsbBtnRect.h) {
-                    state.pressedButton = 2;
-                    if (remote_usb_handler_) {
-                        remote_usb_handler_(*this);
+                // Only allow button clicks if buttons are currently enabled
+                if (state.buttonsEnabled) {
+                    if (mx >= localUsbBtnRect.x && mx <= localUsbBtnRect.x + localUsbBtnRect.w &&
+                        my >= localUsbBtnRect.y && my <= localUsbBtnRect.y + localUsbBtnRect.h) {
+                        state.pressedButton = 1;
+                        state.listItems.clear();
+                        state.selectedIndex = -1;
+                        if (local_usb_handler_) {
+                            local_usb_handler_(*this);
+                        }    
                     }
-                }
-       
-                else if (mx >= remoteAttachBtnRect.x && mx <= remoteAttachBtnRect.x + remoteAttachBtnRect.w &&
-                         my >= remoteAttachBtnRect.y && my <= remoteAttachBtnRect.y + remoteAttachBtnRect.h) {
-                    state.pressedButton = 3;
-                    if (remote_attach_handler_) {
-                        remote_attach_handler_(*this);
+                    else if (mx >= remoteUsbBtnRect.x && mx <= remoteUsbBtnRect.x + remoteUsbBtnRect.w &&
+                             my >= remoteUsbBtnRect.y && my <= remoteUsbBtnRect.y + remoteUsbBtnRect.h) {
+                        state.pressedButton = 2;
+                        if (remote_usb_handler_) {
+                            remote_usb_handler_(*this);
+                        }
                     }
-                }
-                
-                else if (mx >= remoteDetachBtnRect.x && mx <= remoteDetachBtnRect.x + remoteDetachBtnRect.w &&
-                         my >= remoteDetachBtnRect.y && my <= remoteDetachBtnRect.y + remoteDetachBtnRect.h) {
-                    state.pressedButton = 4;
-                    if (remote_detach_handler_) {
-                        remote_detach_handler_(*this);
+                    else if (mx >= remoteAttachBtnRect.x && mx <= remoteAttachBtnRect.x + remoteAttachBtnRect.w &&
+                             my >= remoteAttachBtnRect.y && my <= remoteAttachBtnRect.y + remoteAttachBtnRect.h) {
+                        state.pressedButton = 3;
+                        if (remote_attach_handler_) {
+                            remote_attach_handler_(*this);
+                        }
                     }
-                }
-  
-                else if (mx >= logBtnRect.x && mx <= logBtnRect.x + logBtnRect.w &&
-                         my >= logBtnRect.y && my <= logBtnRect.y + logBtnRect.h) {
-                    state.pressedButton = 5;
-                    if (log_handler_) {
-                        log_handler_(*this);
+                    else if (mx >= remoteDetachBtnRect.x && mx <= remoteDetachBtnRect.x + remoteDetachBtnRect.w &&
+                             my >= remoteDetachBtnRect.y && my <= remoteDetachBtnRect.y + remoteDetachBtnRect.h) {
+                        state.pressedButton = 4;
+                        if (remote_detach_handler_) {
+                            remote_detach_handler_(*this);
+                        }
+                    }
+                    else if (mx >= logBtnRect.x && mx <= logBtnRect.x + logBtnRect.w &&
+                             my >= logBtnRect.y && my <= logBtnRect.y + logBtnRect.h) {
+                        state.pressedButton = 5;
+                        if (log_handler_) {
+                            log_handler_(*this);
+                        }
                     }
                 }
 
@@ -239,7 +237,7 @@ void GUI::render() {
     SDL_Color white       = { 255, 255, 255, 255 };
     SDL_Color black       = { 0, 0, 0, 255 };
     SDL_Color localColor  = { 70, 130, 180, 255 };   // Steel Blue
-    SDL_Color remoteColor = { 138, 43, 226, 255 };  // Purple (shared by RemoteUSB, RemoteAttach, and RemoteDetach)
+    SDL_Color remoteColor = { 138, 43, 226, 255 };  // Purple
     SDL_Color logColor    = { 209, 154, 102, 255 };  // Orange
     SDL_Color gray        = { 60, 64, 72, 255 };
     SDL_Color highlight   = { 100, 149, 237, 255 };
@@ -250,54 +248,73 @@ void GUI::render() {
     SDL_RenderFillRect(renderer, &textBoxRect);
     if (font) renderText(renderer, font, state.inputText, textBoxRect.x + 8, textBoxRect.y + 8, black);
 
+    // Helper lambda for button coloring depending on enabled state
+    auto getButtonColor = [&](SDL_Color baseColor, int btnID) {
+        if (!state.buttonsEnabled) {
+            return SDL_Color{ 90, 95, 105, 255 }; // Disabled Gray
+        }
+        bool isPressed = (state.pressedButton == btnID);
+        return SDL_Color{ 
+            (Uint8)(baseColor.r - (isPressed ? 30 : 0)), 
+            (Uint8)(baseColor.g - (isPressed ? 30 : 0)), 
+            (Uint8)(baseColor.b - (isPressed ? 30 : 0)), 
+            255 
+        };
+    };
 
+    // 1. LocalUSB
     {
         bool isPressed = (state.pressedButton == 1);
         SDL_Rect rect = localUsbBtnRect;
-        if (isPressed) { rect.x += 2; rect.y += 2; }
-        SDL_SetRenderDrawColor(renderer, localColor.r - (isPressed ? 30 : 0), localColor.g - (isPressed ? 30 : 0), localColor.b - (isPressed ? 30 : 0), 255);
+        if (isPressed && state.buttonsEnabled) { rect.x += 2; rect.y += 2; }
+        SDL_Color col = getButtonColor(localColor, 1);
+        SDL_SetRenderDrawColor(renderer, col.r, col.g, col.b, 255);
         SDL_RenderFillRect(renderer, &rect);
-        if (font) renderText(renderer, font, "LocalUSB", rect.x + 20, rect.y + 8, white);
+        if (font) renderText(renderer, font, "LocalUSB", rect.x + 20, rect.y + 8, state.buttonsEnabled ? white : SDL_Color{160, 160, 160, 255});
     }
 
-
+    // 2. RemoteUSB
     {
         bool isPressed = (state.pressedButton == 2);
         SDL_Rect rect = remoteUsbBtnRect;
-        if (isPressed) { rect.x += 2; rect.y += 2; }
-        SDL_SetRenderDrawColor(renderer, remoteColor.r - (isPressed ? 30 : 0), remoteColor.g - (isPressed ? 30 : 0), remoteColor.b - (isPressed ? 30 : 0), 255);
+        if (isPressed && state.buttonsEnabled) { rect.x += 2; rect.y += 2; }
+        SDL_Color col = getButtonColor(remoteColor, 2);
+        SDL_SetRenderDrawColor(renderer, col.r, col.g, col.b, 255);
         SDL_RenderFillRect(renderer, &rect);
-        if (font) renderText(renderer, font, "RemoteUSB", rect.x + 18, rect.y + 8, white);
+        if (font) renderText(renderer, font, "RemoteUSB", rect.x + 18, rect.y + 8, state.buttonsEnabled ? white : SDL_Color{160, 160, 160, 255});
     }
 
-
+    // 3. RemoteAttach
     {
         bool isPressed = (state.pressedButton == 3);
         SDL_Rect rect = remoteAttachBtnRect;
-        if (isPressed) { rect.x += 2; rect.y += 2; }
-        SDL_SetRenderDrawColor(renderer, remoteColor.r - (isPressed ? 30 : 0), remoteColor.g - (isPressed ? 30 : 0), remoteColor.b - (isPressed ? 30 : 0), 255);
+        if (isPressed && state.buttonsEnabled) { rect.x += 2; rect.y += 2; }
+        SDL_Color col = getButtonColor(remoteColor, 3);
+        SDL_SetRenderDrawColor(renderer, col.r, col.g, col.b, 255);
         SDL_RenderFillRect(renderer, &rect);
-        if (font) renderText(renderer, font, "RemoteAttach", rect.x + 14, rect.y + 8, white);
+        if (font) renderText(renderer, font, "RemoteAttach", rect.x + 14, rect.y + 8, state.buttonsEnabled ? white : SDL_Color{160, 160, 160, 255});
     }
 
-
+    // 4. RemoteDetach
     {
         bool isPressed = (state.pressedButton == 4);
         SDL_Rect rect = remoteDetachBtnRect;
-        if (isPressed) { rect.x += 2; rect.y += 2; }
-        SDL_SetRenderDrawColor(renderer, remoteColor.r - (isPressed ? 30 : 0), remoteColor.g - (isPressed ? 30 : 0), remoteColor.b - (isPressed ? 30 : 0), 255);
+        if (isPressed && state.buttonsEnabled) { rect.x += 2; rect.y += 2; }
+        SDL_Color col = getButtonColor(remoteColor, 4);
+        SDL_SetRenderDrawColor(renderer, col.r, col.g, col.b, 255);
         SDL_RenderFillRect(renderer, &rect);
-        if (font) renderText(renderer, font, "RemoteDetach", rect.x + 14, rect.y + 8, white);
+        if (font) renderText(renderer, font, "RemoteDetach", rect.x + 14, rect.y + 8, state.buttonsEnabled ? white : SDL_Color{160, 160, 160, 255});
     }
 
-
+    // 5. Log
     {
         bool isPressed = (state.pressedButton == 5);
         SDL_Rect rect = logBtnRect;
-        if (isPressed) { rect.x += 2; rect.y += 2; }
-        SDL_SetRenderDrawColor(renderer, logColor.r - (isPressed ? 30 : 0), logColor.g - (isPressed ? 30 : 0), logColor.b - (isPressed ? 30 : 0), 255);
+        if (isPressed && state.buttonsEnabled) { rect.x += 2; rect.y += 2; }
+        SDL_Color col = getButtonColor(logColor, 5);
+        SDL_SetRenderDrawColor(renderer, col.r, col.g, col.b, 255);
         SDL_RenderFillRect(renderer, &rect);
-        if (font) renderText(renderer, font, "Log", rect.x + 36, rect.y + 8, white);
+        if (font) renderText(renderer, font, "Log", rect.x + 36, rect.y + 8, state.buttonsEnabled ? white : SDL_Color{160, 160, 160, 255});
     }
 
     // ListView Panel
