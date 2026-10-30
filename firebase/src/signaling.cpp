@@ -255,8 +255,16 @@ void SignalingClient::HandleGracefulExit(const std::string& room_id, const std::
     if (!db_ || room_id.empty()) return;
     StopHeartbeat();
     SendTargetedMessage(room_id, my_client_id, "ALL", "SYSTEM_EVENT: Goodbye! I have closed my connection.");
+    
     if (!my_client_id.empty()) {
-        db_->Collection("rooms").Document(room_id).Collection("peers").Document(my_client_id).Delete();
+        auto delete_future = db_->Collection("rooms").Document(room_id).Collection("peers").Document(my_client_id).Delete();
+        
+        // Wait up to 1.5 seconds for the network delete request to complete
+        int elapsed_ms = 0;
+        while (delete_future.status() == firebase::kFutureStatusPending && elapsed_ms < 1500) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            elapsed_ms += 50;
+        }
     }
 }
 

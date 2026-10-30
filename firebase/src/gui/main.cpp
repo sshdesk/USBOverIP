@@ -14,7 +14,7 @@
 #include <chrono>
 #include <spdlog/spdlog.h>
 
-#include "signaling.h"
+#include "../signaling.h"
 #include "../webrtc_usbipd.h"
 #include "../tcptunnel.h"
 

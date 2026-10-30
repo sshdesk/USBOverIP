@@ -14,7 +14,7 @@
 #include <ctime>
 #include <functional>
 
-#include "signaling.h"
+#include "../signaling.h"
 #include "../webrtc_usbip.h"
 #include "../webrtc_stats.h"
 #include "../tcptunnel.h"
@@ -228,7 +228,6 @@ void UsbIpCommands::attachDataChannelCallback(WebRtcManager_usbip* manager) {
         if (is_open) {
             SPDLOG_INFO("[Tunnel Manager] DataChannel opened. Linking to TCP tunnel manager...");
 
-            // Retrieve DataChannel and signaling thread directly from the triggering manager instance
             auto dc = manager->GetDataChannel();
             auto* sig_thread = manager->GetSignalingThread();
 
@@ -237,7 +236,6 @@ void UsbIpCommands::attachDataChannelCallback(WebRtcManager_usbip* manager) {
                 return;
             }
 
-            // Retain ref-counted DataChannel and pass to background task safely
             std::thread([this, dc, sig_thread]() {
                 if (!tunnel_manager_) return;
 
@@ -253,7 +251,6 @@ void UsbIpCommands::attachDataChannelCallback(WebRtcManager_usbip* manager) {
         } else {
             SPDLOG_WARN("[Tunnel Manager] DataChannel closed. Stopping TCP tunnel manager...");
             
-            // Release TCP port binding so future reconnect attempts do not fail with bind errors
             if (tunnel_manager_) {
                 tunnel_manager_->Stop();
             }
@@ -264,8 +261,6 @@ void UsbIpCommands::attachDataChannelCallback(WebRtcManager_usbip* manager) {
 void UsbIpCommands::executeCommand(const std::vector<std::string> &args_utf8) {
   std::vector<std::wstring> args_w;
 
-  // CLI11 skips argv[0] as the program name.
-  // Only prepend "usbip" if args_utf8 does not already include it.
   if (args_utf8.empty() || args_utf8.front() != "usbip") {
     args_w.push_back(L"usbip");
   }
@@ -304,7 +299,6 @@ int UsbIpCommands::executeCLI(int argc, wchar_t *argv[]) {
     return EXIT_FAILURE;
   }
 
-  // Use a fresh CLI::App per run, exactly as in usbip.cpp
   CLI::App app("USB/IP Client & WebRTC Tunnel Utility");
   init(app);
 
@@ -353,7 +347,12 @@ int UsbIpCommands::initializeTunnelSession() {
         SPDLOG_ERROR("[EVENT NOTICE] Peer [{}] has disconnected or left the room.", peer_client_id);
         SPDLOG_ERROR("=================================================================");
 
-        shutdownTunnel();
+
+        std::thread([this]() {
+            executeCommand({"detach", "-a"});
+            shutdownTunnel();
+        }).detach();
+
         SPDLOG_INFO("[WebRTC State Reset] Standing by. Waiting for new peer connection...");
     });
 
@@ -391,7 +390,6 @@ int UsbIpCommands::initializeTunnelSession() {
 
     signaling_client->ListenForTargetedMessages(active_room_id, global_client_id);
 
-    // Join room without blocking: first to join waits as CALLEE; second creates offer as CALLER
     signaling_client->JoinRoom(active_room_id, global_client_id, [this](bool is_caller, const std::string& remote_peer_id) {
         if (is_caller) {
             SPDLOG_INFO("[WebRTC Role] Assigned CALLER. Initiating connection offer to peer [{}]...", remote_peer_id);
@@ -425,7 +423,9 @@ void UsbIpCommands::shutdownTunnel() {
 }
 
 void UsbIpCommands::shutdown() {
+  
     executeCommand({"detach", "-a"});
+
     if (signaling_client && !active_room_id.empty()) {
         signaling_client->HandleGracefulExit(active_room_id, global_client_id);
     }

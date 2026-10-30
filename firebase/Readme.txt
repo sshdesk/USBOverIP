@@ -118,7 +118,7 @@ xcopy ..\google-services.json .\Release\ /Y
 
 
 
-
+https://console.firebase.google.com/?pli=1
 
 
 #GitHub Pages (Free Permanent Hosting) 

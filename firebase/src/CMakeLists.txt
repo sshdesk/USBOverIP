@@ -54,7 +54,7 @@ find_package(SDL2_ttf REQUIRED CONFIG)
 add_executable(gui_usbip WIN32 gui/gui.cpp gui/main.cpp gui/logsync.cpp  gui/usbip_commands.cpp gui/usbipd_commands.cpp
     webrtc_usbipd.cpp
     webrtc_usbip.cpp
-    gui/signaling.cpp
+    signaling.cpp
     webrtc_stats.cpp
     vbox_service_manager.cpp
     tcptunnel.cpp
@@ -109,7 +109,7 @@ target_link_libraries(gui_usbip PRIVATE
 add_executable(gui_usbip2 WIN32 gui/gui.cpp gui/main.cpp gui/logsync.cpp  gui/usbip_commands.cpp gui/usbipd_commands.cpp
     webrtc_usbipd.cpp
     webrtc_usbip.cpp
-    gui/signaling.cpp
+    signaling.cpp
     webrtc_stats.cpp
     vbox_service_manager.cpp
     tcptunnel.cpp
