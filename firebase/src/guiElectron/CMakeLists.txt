@@ -36,13 +36,13 @@ find_package(spdlog REQUIRED CONFIG)
 find_package(ZLIB REQUIRED CONFIG)
 
 # Headless executable (WITHOUT WIN32 keyword so stdout/stdin pipes work properly)
-add_executable(gui_usbip
-    gui/main.cpp
-    gui/usbip_commands.cpp
-    gui/usbipd_commands.cpp
+add_executable(guiElectron
+    guiElectron/main.cpp
+    usbip_commands.cpp
+    usbipd_commands.cpp
     webrtc_usbipd.cpp
     webrtc_usbip.cpp
-    gui/signaling.cpp
+    signaling.cpp
     webrtc_stats.cpp
     vbox_service_manager.cpp
     tcptunnel.cpp
@@ -54,23 +54,24 @@ add_executable(gui_usbip
     usbipd/src/usbip_server.cpp  
 )
 
-target_include_directories(gui_usbip PRIVATE
+target_include_directories(guiElectron PRIVATE
     gui
     usbipd/include
-    ./gui_usbip
+    guiElectron
     usbip/include/usbip
     usbip/userspace/usbip
     usbip/userspace
+    ./
 )
 
 if(WIN32)
-    target_compile_definitions(gui_usbip PRIVATE WEBRTC_WIN NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_link_options(gui_usbip PRIVATE "/IGNORE:4099")
+    target_compile_definitions(guiElectron PRIVATE WEBRTC_WIN NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_options(guiElectron PRIVATE "/IGNORE:4099")
 else()
-    target_compile_definitions(gui_usbip PRIVATE WEBRTC_POSIX)
+    target_compile_definitions(guiElectron PRIVATE WEBRTC_POSIX)
 endif()
 
-target_link_libraries(gui_usbip PRIVATE 
+target_link_libraries(guiElectron PRIVATE 
     google-webrtc::google-webrtc 
     openssl::openssl 
     Opus::opus 

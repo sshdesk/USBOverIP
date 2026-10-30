@@ -12,7 +12,7 @@ This package contains the complete, working replacement for the SDL-based GUI, i
 │   └── logsync.h            # Headless logging sink
 └── electron/
     ├── package.json         # Node.js / Electron package dependencies
-    ├── main.js              # Electron main process spawning gui_usbip
+    ├── main.js              # Electron main process spawning guiElectron
     ├── preload.js           # Secure contextBridge API for the renderer
     ├── index.html           # Dark-themed GUI layout matching original SDL features
     └── renderer.js          # Interactive button listeners and device list rendering
@@ -26,7 +26,7 @@ In your project root (where `CMakeLists.txt` is located):
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 ```
-This generates `build/Release/gui_usbip.exe` (or `build/gui_usbip` on Linux).
+This generates `build/Release/guiElectron.exe` (or `build/guiElectron` on Linux).
 
 ### 2. Run the Electron Frontend
 Navigate to the `electron/` directory:

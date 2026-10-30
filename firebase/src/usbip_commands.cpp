@@ -14,10 +14,10 @@
 #include <ctime>
 #include <functional>
 
-#include "../signaling.h"
-#include "../webrtc_usbip.h"
-#include "../webrtc_stats.h"
-#include "../tcptunnel.h"
+#include "signaling.h"
+#include "webrtc_usbip.h"
+#include "webrtc_stats.h"
+#include "tcptunnel.h"
 
 #include "usbip.h"
 #include "resource.h"

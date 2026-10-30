@@ -50,8 +50,58 @@ find_package(ZLIB REQUIRED CONFIG)
 find_package(SDL2 REQUIRED CONFIG)
 find_package(SDL2_ttf REQUIRED CONFIG)
 
+add_executable(guiElectron
+    guiElectron/main.cpp
+    usbip_commands.cpp
+    usbipd_commands.cpp
+    webrtc_usbipd.cpp
+    webrtc_usbip.cpp
+    signaling.cpp
+    webrtc_stats.cpp
+    vbox_service_manager.cpp
+    tcptunnel.cpp
+    usbip/userspace/usbip/usbip.rc
 
-add_executable(gui_usbip WIN32 gui/gui.cpp gui/main.cpp gui/logsync.cpp  gui/usbip_commands.cpp gui/usbipd_commands.cpp
+    # USBIPD Source Files
+    usbipd/src/usb_device_hid.cpp  
+    usbipd/src/usb_device_passthrough.cpp  
+    usbipd/src/usbip_server.cpp  
+)
+
+target_include_directories(guiElectron PRIVATE
+    guiElectron
+    usbipd/include
+    usbip/include/usbip
+    usbip/userspace/usbip
+    usbip/userspace
+    ./
+)
+
+if(WIN32)
+    target_compile_definitions(guiElectron PRIVATE WEBRTC_WIN NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_options(guiElectron PRIVATE "/IGNORE:4099")
+else()
+    target_compile_definitions(guiElectron PRIVATE WEBRTC_POSIX)
+endif()
+
+target_link_libraries(guiElectron PRIVATE 
+    google-webrtc::google-webrtc 
+    openssl::openssl 
+    Opus::opus 
+    spdlog::spdlog 
+    usbip
+    firebase_firestore
+    firebase_database
+    firebase_auth
+    firebase_app
+    ws2_32 winmm secur32 crypt32 iphlpapi shlwapi user32 gdi32
+    ZLIB::ZLIB 
+)
+
+
+
+
+add_executable(gui_usbip WIN32 gui/gui.cpp gui/main.cpp gui/logsync.cpp  usbip_commands.cpp usbipd_commands.cpp
     webrtc_usbipd.cpp
     webrtc_usbip.cpp
     signaling.cpp
@@ -68,7 +118,7 @@ add_executable(gui_usbip WIN32 gui/gui.cpp gui/main.cpp gui/logsync.cpp  gui/usb
 )
 
 target_include_directories(gui_usbip PRIVATE
-    usbipd/include  ./gui_usbip
+    usbipd/include  gui  ./
     usbip/include/usbip  usbip/userspace/usbip usbip/userspace
 )
 
@@ -106,7 +156,7 @@ target_link_libraries(gui_usbip PRIVATE
 
 
 
-add_executable(gui_usbip2 WIN32 gui/gui.cpp gui/main.cpp gui/logsync.cpp  gui/usbip_commands.cpp gui/usbipd_commands.cpp
+add_executable(gui_usbip2 WIN32 gui/gui.cpp gui/main.cpp gui/logsync.cpp  usbip_commands.cpp usbipd_commands.cpp
     webrtc_usbipd.cpp
     webrtc_usbip.cpp
     signaling.cpp
@@ -123,7 +173,7 @@ add_executable(gui_usbip2 WIN32 gui/gui.cpp gui/main.cpp gui/logsync.cpp  gui/us
 )
 
 target_include_directories(gui_usbip2 PRIVATE
-    usbipd/include  ./gui_usbip
+    usbipd/include  ./  gui
     usbip/include/usbip  usbip/userspace/usbip usbip/userspace
 )
 

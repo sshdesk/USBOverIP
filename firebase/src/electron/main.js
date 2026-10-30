@@ -7,10 +7,10 @@ let mainWindow = null;
 let cppProcess = null;
 
 function resolveBinaryPath() {
-  const binaryName = process.platform === 'win32' ? 'gui_usbip.exe' : 'gui_usbip';
+  const binaryName = process.platform === 'win32' ? 'guiElectron.exe' : 'guiElectron';
   const candidates = [
-    path.join(__dirname, '..', 'build', 'Release', binaryName),
-    path.join(__dirname, '..', 'build', 'Debug', binaryName),
+    path.join(__dirname, '..', 'build-cache-windows_release', 'Release', binaryName),
+    path.join(__dirname, '..', 'build-cache-windows_debug', 'Debug', binaryName),
     path.join(__dirname, '..', 'build', binaryName),
     path.join(__dirname, '..', 'bin', binaryName),
     path.join(__dirname, 'bin', binaryName)

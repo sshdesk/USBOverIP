@@ -27,8 +27,8 @@
 #endif
 
 #include "signaling.h"
-#include "../webrtc_usbipd.h"
-#include "../tcptunnel.h"
+#include "webrtc_usbipd.h"
+#include "tcptunnel.h"
 
 std::atomic<bool> keep_running{true};
 std::atomic<bool> is_datachannel_connected{false};

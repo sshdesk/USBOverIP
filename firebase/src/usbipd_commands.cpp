@@ -1,7 +1,7 @@
 #include "usbipd_commands.h"
-#include "../webrtc_usbipd.h"
-#include "../signaling.h"
-#include "../vbox_service_manager.h"
+#include "webrtc_usbipd.h"
+#include "signaling.h"
+#include "vbox_service_manager.h"
 #include <spdlog/spdlog.h>
 #include <iostream>
 #include "logsync.h"
