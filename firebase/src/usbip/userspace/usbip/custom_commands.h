@@ -12,6 +12,9 @@
 
 #include <winsock2.h>
 
+struct rtc_data_channel;
+extern "C" int data_channel_send(rtc_data_channel *channel, const void *data, size_t size);
+
 namespace usbip::custom
 {
 inline bool send_exact(SOCKET s, const void *data, size_t length)
@@ -38,8 +41,7 @@ inline bool recv_exact(SOCKET s, void *data, size_t length)
     return true;
 }
 
-// LIST has a standard USB/IP DEVLIST reply body. BIND/DETACH return two
-// network-order uint32 values: command echo and status (0 means success).
+
 inline bool request_status(const std::string &host, const std::string &service,
                            UINT32 command, const std::string &busid = {})
 {
@@ -87,4 +89,41 @@ inline bool request_status(const std::string &host, const std::string &service,
 
     return true;
 }
+
+
+inline bool request_status(rtc_data_channel *channel,
+                           UINT32 command, const std::string &busid = {})
+{
+    if (command != USBIP_CMD_CUSTOM_DETACH) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return false;
+    }
+
+    if (!channel) {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return false;
+    }
+
+    const UINT32 wire_command = htonl(command);
+    if (data_channel_send(channel, &wire_command, sizeof(wire_command)) != 0) {
+        SetLastError(WSAECONNRESET);
+        return false;
+    }
+
+    if (busid.empty() || busid.size() >= BUS_ID_SIZE) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return false;
+    }
+    std::array<char, BUS_ID_SIZE> wire_busid{};
+    std::memcpy(wire_busid.data(), busid.data(), busid.size());
+    if (data_channel_send(channel, wire_busid.data(), wire_busid.size()) != 0) {
+        SetLastError(WSAECONNRESET);
+        return false;
+    }
+
+   
+
+    return true;
+}
+
 } // namespace usbip::custom

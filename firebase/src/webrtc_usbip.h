@@ -21,6 +21,7 @@ public:
     bool Initialize();
     void StartConnectionSequence();
     void ShutdownConnection();
+    void StartHeartbeatLoop();
 
     void HandleRemoteSdp(const std::string& type, const std::string& sdp);
     void HandleRemoteIceCandidate(const std::string& mid, int mline_index, const std::string& sdp);

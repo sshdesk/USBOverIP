@@ -7,8 +7,12 @@
 #include "log.h"
 #include "custom_commands.h"
 #include <libusbip/vhci.h>
-
 #include <print>
+#include <thread>
+#include <chrono>
+struct rtc_data_channel;
+extern "C" rtc_data_channel *get_active_rtc_channel(void);
+
 
 bool usbip::cmd_detach(const detach_args &args)
 {
@@ -49,42 +53,63 @@ bool usbip::cmd_detach(const detach_args &args)
         // that as a transient network failure and immediately retry IMPORT while the
         // port is still present, creating the random reconnect loop seen in logs.
         auto ok = vhci::detach(dev.get(), args.port);
-
         if (!ok) {
                 log::error(get_last_error_msg());
                 return false;
         }
 
-        // The local detach normally causes the server's import loop to exit and
-        // release its capture. CUSTOM_DETACH is sent afterwards as an idempotent
-        // cleanup barrier; it must not be used to trigger the disconnect before the
-        // local VHCI port has been removed.
-        if (imported && args.port != vhci::port_all_closeonly) {
+        // Allow a brief settling window for active TCP commands to complete and sockets to tear down Poll until the previous TCP client socket is
+        // fully closed/released and ready for a new connection
+       
+        
+         std::this_thread::sleep_for(std::chrono::milliseconds(1000)); 
+        while (true)
+        {
+          if (args.port == vhci::port_all_closeonly) {
+            log::debug("all network connections are closed");
+            break;
+          } else if (args.port <= 0) {
+            log::debug("all ports are detached");
+            break;
+          } else {
+            log::debug("port {} is successfully detached", args.port);
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        }
+        
+
+
+
+        // Invoke custom detach via TCP once the port/connection is ready
+        if (imported ) {
                 for (const auto &item : *imported) {
-                        const bool selected = args.port <= 0 || item.port == args.port;
-                        if (!selected || item.location.hostname.empty() || item.location.busid.empty()) {
-                                continue;
+                         rtc_data_channel *channel = get_active_rtc_channel();
+
+                        log::debug("Custom detach invoked via TCP for BUSID {}",
+                                   item.location.busid);
+
+                           if (!custom::request_status(channel,
+                                                    USBIP_CMD_CUSTOM_DETACH,
+                                                    item.location.busid)) {
+                          log::error(
+                              "Remote DETACH cleanup failed for BUSID {}: {}",
+                              item.location.busid, get_last_error_msg());
                         }
 
-                    /*    if (!custom::request_status(item.location.hostname, item.location.service,
+                        // Using TCP request_status overload/implementation
+           /*             if (!custom::request_status(
+                                item.location.hostname, item.location.service,
                                                     USBIP_CMD_CUSTOM_DETACH, item.location.busid)) {
                                 log::error("Remote DETACH cleanup failed for {}:{} BUSID {}: {}",
                                            item.location.hostname, item.location.service,
                                            item.location.busid, get_last_error_msg());
+                        } else {
+                                log::debug("Remote DETACH cleanup succeeded for BUSID {}", item.location.busid);
                         }*/
                 }
         }
 
-        if (args.port == vhci::port_all_closeonly) {
-                std::println("all network connections are closed");
-        } else if (args.port <= 0) {
-                std::println("all ports are detached");
-        } else {
-                std::println("port {} is successfully detached", args.port);
-        }
+
 
         return true;
 }
-
-
-

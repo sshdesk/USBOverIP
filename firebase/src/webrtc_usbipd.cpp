@@ -9,6 +9,34 @@
 
 extern usbip_server_t* g_server;
 
+// Helper function to convert PeerConnectionState enum to string
+static std::string PeerConnectionStateToString(webrtc::PeerConnectionInterface::PeerConnectionState state) {
+    switch (state) {
+        case webrtc::PeerConnectionInterface::PeerConnectionState::kNew: return "NEW";
+        case webrtc::PeerConnectionInterface::PeerConnectionState::kConnecting: return "CONNECTING";
+        case webrtc::PeerConnectionInterface::PeerConnectionState::kConnected: return "CONNECTED";
+        case webrtc::PeerConnectionInterface::PeerConnectionState::kDisconnected: return "DISCONNECTED";
+        case webrtc::PeerConnectionInterface::PeerConnectionState::kFailed: return "FAILED";
+        case webrtc::PeerConnectionInterface::PeerConnectionState::kClosed: return "CLOSED";
+        default: return "UNKNOWN";
+    }
+}
+
+// Helper function to convert IceConnectionState enum to string
+static std::string IceConnectionStateToString(
+    webrtc::PeerConnectionInterface::IceConnectionState state) {
+    switch (state) {
+        case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionNew: return "NEW";
+        case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionChecking: return "CHECKING";
+        case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionConnected: return "CONNECTED";
+        case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionCompleted: return "COMPLETED";
+        case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionFailed: return "FAILED";
+        case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionDisconnected: return "DISCONNECTED";
+        case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionClosed: return "CLOSED";
+        default: return "UNKNOWN";
+    }
+}
+
 extern "C" {
     bool rtc_data_channel_send(rtc_data_channel_t *dc, const void *data, size_t size) {
         if (!dc) return false;
@@ -216,11 +244,11 @@ void WebRtcManager_usbipd::InternalPeerConnectionObserver::OnIceCandidate(const 
 }
 
 void WebRtcManager_usbipd::InternalPeerConnectionObserver::OnIceConnectionChange(webrtc::PeerConnectionInterface::IceConnectionState new_state) {
-    SPDLOG_INFO("==> [WebRTC ICE NETWORK CHANGED]: Status Code Enum Value -> {}", static_cast<int>(new_state));
+    SPDLOG_INFO("==> [WebRTC ICE NETWORK CHANGED]: Status -> {}", IceConnectionStateToString(new_state));
 }
 
 void WebRtcManager_usbipd::InternalPeerConnectionObserver::OnConnectionChange(webrtc::PeerConnectionInterface::PeerConnectionState new_state) {
-    SPDLOG_INFO("==> [WebRTC CORE PIPELINE CHANGED]: Status Code Enum Value -> {}", static_cast<int>(new_state));
+    SPDLOG_INFO("==> [WebRTC CORE PIPELINE CHANGED]: Status -> {}", PeerConnectionStateToString(new_state));
 }
 
 void WebRtcManager_usbipd::InternalPeerConnectionObserver::OnDataChannel(rtc::scoped_refptr<webrtc::DataChannelInterface> data_channel) {
@@ -293,9 +321,6 @@ void WebRtcManager_usbipd::InternalDataChannelObserver::OnMessage(const webrtc::
         std::string msg(reinterpret_cast<const char*> (buffer.data.data()), buffer.data.size());
         SPDLOG_INFO("[DATA CHANNEL RECEIVED BUFFER]: {}", msg);
     }
-
-    //SPDLOG_INFO("[DATA CHANNEL RECEIVED BUFFER]: {}", buffer.data.size());
-    //manager_.data_channel_->Send(buffer);
 }
 
 bool WebRtcManager_usbipd::IsDataChannelOpen() const {

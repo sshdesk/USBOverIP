@@ -3,6 +3,40 @@
 #include "api/create_peerconnection_factory.h"
 #include <spdlog/spdlog.h>
 #include <vector>
+#include <mutex>
+#include <deque>
+
+// Global active WebRTC manager tracking for custom commands like DETACH
+static WebRtcManager_usbip* g_active_webrtc_manager = nullptr;
+static std::mutex g_rtc_channel_mutex;
+
+// Helper function to convert PeerConnectionState enum to string
+static std::string PeerConnectionStateToString(webrtc::PeerConnectionInterface::PeerConnectionState state) {
+    switch (state) {
+        case webrtc::PeerConnectionInterface::PeerConnectionState::kNew: return "NEW";
+        case webrtc::PeerConnectionInterface::PeerConnectionState::kConnecting: return "CONNECTING";
+        case webrtc::PeerConnectionInterface::PeerConnectionState::kConnected: return "CONNECTED";
+        case webrtc::PeerConnectionInterface::PeerConnectionState::kDisconnected: return "DISCONNECTED";
+        case webrtc::PeerConnectionInterface::PeerConnectionState::kFailed: return "FAILED";
+        case webrtc::PeerConnectionInterface::PeerConnectionState::kClosed: return "CLOSED";
+        default: return "UNKNOWN";
+    }
+}
+
+// Helper function to convert IceConnectionState enum to string
+static std::string IceConnectionStateToString(
+    webrtc::PeerConnectionInterface::IceConnectionState state) {
+    switch (state) {
+        case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionNew: return "NEW";
+        case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionChecking: return "CHECKING";
+        case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionConnected: return "CONNECTED";
+        case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionCompleted: return "COMPLETED";
+        case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionFailed: return "FAILED";
+        case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionDisconnected: return "DISCONNECTED";
+        case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionClosed: return "CLOSED";
+        default: return "UNKNOWN";
+    }
+}
 
 WebRtcManager_usbip::WebRtcManager_usbip(const std::string& room_id, const std::string& client_id, bool is_Client)
     : room_id_(room_id), my_client_id_(client_id), is_Client(is_Client), pc_observer_(*this), dc_observer_(*this) {
@@ -12,6 +46,13 @@ WebRtcManager_usbip::WebRtcManager_usbip(const std::string& room_id, const std::
 WebRtcManager_usbip::~WebRtcManager_usbip() {
     SPDLOG_INFO("[WebRTC Lifecycle] WebRtcManager_usbip instance destructor invoked.");
     ShutdownConnection();
+    
+    {
+        std::lock_guard<std::mutex> lock(g_rtc_channel_mutex);
+        if (g_active_webrtc_manager == this) {
+            g_active_webrtc_manager = nullptr;
+        }
+    }
 }
 
 bool WebRtcManager_usbip::Initialize() {
@@ -68,6 +109,11 @@ bool WebRtcManager_usbip::Initialize() {
         }
     }
 
+    {
+        std::lock_guard<std::mutex> lock(g_rtc_channel_mutex);
+        g_active_webrtc_manager = this;
+    }
+
     return true;
 }
 
@@ -116,6 +162,30 @@ void WebRtcManager_usbip::ShutdownConnection() {
     if (signaling_thread_) signaling_thread_->Stop();
     
     SPDLOG_INFO("[WebRTC TearDown] Native execution thread pools successfully unmounted.");
+}
+
+void WebRtcManager_usbip::StartHeartbeatLoop() {
+  if (!signaling_thread_)
+    return;
+
+
+  signaling_thread_->PostDelayedTask(
+      [this]() {
+        if (!IsDataChannelOpen()) {
+          return;
+        }
+
+        std::string ping_msg = "PING";
+        webrtc::DataBuffer buffer(ping_msg);
+        if (data_channel_ &&
+            data_channel_->state() == webrtc::DataChannelInterface::kOpen) {
+          data_channel_->Send(buffer);
+          SPDLOG_INFO("[Heartbeat] Sent keep-alive PING packet.");
+        }
+
+        StartHeartbeatLoop();
+      },
+      webrtc::TimeDelta::Millis(10000));
 }
 
 void WebRtcManager_usbip::HandleRemoteSdp(const std::string& type, const std::string& sdp) {
@@ -206,11 +276,11 @@ void WebRtcManager_usbip::InternalPeerConnectionObserver::OnIceCandidate(const w
 }
 
 void WebRtcManager_usbip::InternalPeerConnectionObserver::OnIceConnectionChange(webrtc::PeerConnectionInterface::IceConnectionState new_state) {
-    SPDLOG_INFO("==> [WebRTC ICE NETWORK CHANGED]: Status Code Enum Value -> {}", static_cast<int>(new_state));
+    SPDLOG_INFO("==> [WebRTC ICE NETWORK CHANGED]: Status -> {}", IceConnectionStateToString(new_state));
 }
 
 void WebRtcManager_usbip::InternalPeerConnectionObserver::OnConnectionChange(webrtc::PeerConnectionInterface::PeerConnectionState new_state) {
-    SPDLOG_INFO("==> [WebRTC CORE PIPELINE CHANGED]: Status Code Enum Value -> {}", static_cast<int>(new_state));
+    SPDLOG_INFO("==> [WebRTC CORE PIPELINE CHANGED]: Status -> {}", PeerConnectionStateToString(new_state));
 }
 
 void WebRtcManager_usbip::InternalPeerConnectionObserver::OnDataChannel(rtc::scoped_refptr<webrtc::DataChannelInterface> data_channel) {
@@ -248,6 +318,11 @@ void WebRtcManager_usbip::InternalDataChannelObserver::OnStateChange() {
         SPDLOG_INFO("[WebRTC DataChannel State]: Changed to {}", static_cast<int>(current_state));
         
         bool is_open = (current_state == webrtc::DataChannelInterface::kOpen);
+        if (is_open) {
+            SPDLOG_WARN("DataChannel Open! Starting keep-alive heartbeat loop.");
+            manager_.StartHeartbeatLoop();
+        }
+
         if (manager_.dc_state_callback_) {
             manager_.dc_state_callback_(is_open);
         }
@@ -255,10 +330,43 @@ void WebRtcManager_usbip::InternalDataChannelObserver::OnStateChange() {
 }
 
 void WebRtcManager_usbip::InternalDataChannelObserver::OnMessage(const webrtc::DataBuffer& buffer) {
-    // Only intercepting data for tcp tunnel routing done elsewhere in original setup.
-    // Kept passive as requested.
+    if (!buffer.binary) {
+        std::string msg(reinterpret_cast<const char*>(buffer.data.data()), buffer.data.size());
+        if (msg == "PING") {
+            webrtc::DataBuffer pong_buffer("PONG");
+            manager_.data_channel_->Send(pong_buffer);
+            return;
+        } else if (msg == "PONG") {
+            SPDLOG_INFO("[Heartbeat] Received PONG response. Link is healthy.");
+            return;
+        }
+    }
 }
 
 bool WebRtcManager_usbip::IsDataChannelOpen() const {
     return data_channel_ && data_channel_->state() == webrtc::DataChannelInterface::kOpen;
+}
+
+struct rtc_data_channel;
+
+extern "C" {
+
+rtc_data_channel* get_active_rtc_channel(void) {
+    std::lock_guard<std::mutex> lock(g_rtc_channel_mutex);
+    if (!g_active_webrtc_manager) return nullptr;
+    auto dc = g_active_webrtc_manager->GetDataChannel();
+    return reinterpret_cast<rtc_data_channel*>(dc.get());
+}
+
+int data_channel_send(rtc_data_channel *channel, const void *data, size_t size) {
+    auto *dc = reinterpret_cast<webrtc::DataChannelInterface*>(channel);
+    if (!dc || dc->state() != webrtc::DataChannelInterface::kOpen) {
+        return -1;
+    }
+
+    webrtc::DataBuffer buffer(rtc::CopyOnWriteBuffer(static_cast<const char*>(data), size), true);
+    bool sent = dc->Send(buffer);
+    return sent ? 0 : -1;
+}
+
 }

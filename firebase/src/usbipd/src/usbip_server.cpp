@@ -84,12 +84,43 @@ static int send_exact_rtc(usbip_server_t *server, const void *buf, size_t len) {
     return 0;
 }
 
+// static int recv_exact_rtc(usbip_server_t *server, void *buf, size_t len) {
+//     char *ptr = (char *)buf;
+//     size_t total_received = 0;
+    
+//     while (server->running && server->client_connected) {
+//         EnterCriticalSection(&server->lock);
+//         size_t available = ring_buffer_available(server->rx_buffer);
+//         size_t needed = len - total_received;
+        
+//         if (available >= needed) {
+//             ring_buffer_read(server->rx_buffer, (uint8_t *)(ptr + total_received), needed);
+//             LeaveCriticalSection(&server->lock);
+//             total_received += needed;
+//             return 0;
+//         } else if (available > 0) {
+//             ring_buffer_read(server->rx_buffer, (uint8_t *)(ptr + total_received), available);
+//             total_received += available;
+//         }
+//         LeaveCriticalSection(&server->lock);
+        
+//         Sleep(1);
+//     }
+//     return -1;
+// }
+
 static int recv_exact_rtc(usbip_server_t *server, void *buf, size_t len) {
     char *ptr = (char *)buf;
     size_t total_received = 0;
     
-    while (server->running && server->client_connected) {
+    while (server->running && server->worker_running && server->client_connected) {
         EnterCriticalSection(&server->lock);
+        // Check if server or rx_buffer has been torn down
+        if (!server->running || !server->worker_running || !server->rx_buffer) {
+            LeaveCriticalSection(&server->lock);
+            return -1;
+        }
+        
         size_t available = ring_buffer_available(server->rx_buffer);
         size_t needed = len - total_received;
         
@@ -615,6 +646,14 @@ static DWORD WINAPI web_rtc_worker_thread(LPVOID lpParam) {
             continue;
         }
 
+        // Flush any stale or leftover bytes in the rx buffer before reading a new command 
+        // to prevent stream desynchronization or trailing string misinterpretation.
+        EnterCriticalSection(&server->lock);
+        if (server->rx_buffer) {
+            server->rx_buffer->size = 0;
+        }
+        LeaveCriticalSection(&server->lock);
+
         uint32_t first_word = 0;
         if (recv_exact_rtc(server, &first_word, sizeof(first_word)) != 0) {
             server->client_connected = false;
@@ -647,6 +686,7 @@ static DWORD WINAPI web_rtc_worker_thread(LPVOID lpParam) {
         uint16_t command = ntohs(op_hdr.command);
 
         if (version != USBIP_VERSION) {
+            SPDLOG_ERROR("[USB/IP] Version mismatch: 0x{:04x} (expected 0x{:04x})", version, USBIP_VERSION);
             break;
         }
 
@@ -662,7 +702,6 @@ static DWORD WINAPI web_rtc_worker_thread(LPVOID lpParam) {
     }
     return 0;
 }
-
 usbip_server_t *usbip_server_create(void) {
 #ifdef _WIN32
     WSADATA wsa;
