@@ -16,10 +16,10 @@ class StreamingHostRecipe(ConanFile):
         self.requires("zlib/1.3.1")
         self.requires("spdlog/1.17.0")
 
-        #self.requires("sdl/2.30.8")
+
         self.requires("sdl/2.28.3")
         self.requires("sdl_ttf/2.22.0")
-      
+        self.requires("firebase-cpp-sdk/13.12.0")
 
     def build(self):
         cmake = CMake(self)
