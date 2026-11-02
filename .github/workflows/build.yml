@@ -20,10 +20,9 @@ jobs:
           pip install conan
 
       - name: Checkout Source code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
-          submodules: true
-          fetch-depth: 0
+          lfs: true
           token: ${{ secrets.WHOLE_GITHUB_TOKEN }}
 
       # The 3 explicitly required commands executing directly in the repository source layout
