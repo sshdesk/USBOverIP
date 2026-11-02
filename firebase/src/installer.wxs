@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+    <Package Name="USBIP Suite &amp; Drivers" Language="1033" Version="1.0.0.0" Manufacturer="YourCompany" UpgradeCode="6052eb43-9a01-4f89-beed-7f8bfb01689f" InstallerVersion="500" Scope="perMachine">
+
+        <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+        <MediaTemplate EmbedCab="yes" />
+
+        <!-- 1. Directory Structure -->
+        <StandardDirectory Id="ProgramFilesFolder">
+            <Directory Id="INSTALLFOLDER" Name="USBIPSuite">
+                <Directory Id="AppFolder" Name="bin" />
+                <Directory Id="FontsFolderSub" Name="fonts" />
+                <Directory Id="ResourcesFolder" Name="resources" />
+                <Directory Id="ScriptsFolder" Name="scripts" />
+                <Directory Id="DriversFolder" Name="drivers" />
+            </Directory>
+        </StandardDirectory>
+
+        <!-- 2. Application Files & Assets Components -->
+        <DirectoryRef Id="AppFolder">
+            <Component Id="AppBinaryComponent" Guid="ab9a2614-0ab2-4e0d-a78c-3b4a2bbbe62a">
+                <File Id="GuiExe" Source="app\usbip-gui.exe" KeyPath="yes" />
+            </Component>
+        </DirectoryRef>
+
+        <DirectoryRef Id="FontsFolderSub">
+            <Component Id="AppFontsComponent" Guid="63c520f3-257c-4c07-bd89-fb17b672eee2">
+                <File Id="CustomFont" Source="app\fonts\custom-font.ttf" KeyPath="yes" />
+            </Component>
+        </DirectoryRef>
+
+        <DirectoryRef Id="ResourcesFolder">
+            <Component Id="AppResourcesComponent" Guid="b492497e-7604-4ac6-8699-205f06396147">
+                <File Id="LogoPng" Source="app\resources\logo.png" KeyPath="yes" />
+            </Component>
+        </DirectoryRef>
+
+        <!-- 3. PowerShell Scripts Component -->
+        <DirectoryRef Id="ScriptsFolder">
+            <Component Id="ScriptsComponent" Guid="c3c43b98-8e0b-428f-9694-7c19aa18da4f">
+                <File Id="InstallScript" Source="install.ps1" KeyPath="yes" />
+                <File Id="UninstallScript" Source="uninstall.ps1" />
+            </Component>
+        </DirectoryRef>
+
+        <!-- 4. Driver Files Component -->
+        <DirectoryRef Id="DriversFolder">
+            <Component Id="VBoxUsbDriverComponent" Guid="66986af1-4c4b-4f8f-abc4-3541ce544a1c">
+                <File Id="VBoxUSBInf" Source="usbipd\drivers\VBoxUSB.inf" KeyPath="yes" />
+                <File Id="VBoxUSBCat" Source="usbipd\drivers\VBoxUSB.cat" />
+                <File Id="VBoxUSBSys" Source="usbipd\drivers\VBoxUSB.sys" />
+                <File Id="VBoxUSBMonSys" Source="usbipd\drivers\VBoxUSBMon.sys" />
+                <File Id="VBoxUsbPnf" Source="usbipd\drivers\vboxusb.PNF" />
+            </Component>
+        </DirectoryRef>
+
+        <!-- 5. Feature Definition -->
+        <Feature Id="ProductFeature" Title="USBIP Suite" Level="1">
+            <ComponentRef Id="AppBinaryComponent" />
+            <ComponentRef Id="AppFontsComponent" />
+            <ComponentRef Id="AppResourcesComponent" />
+            <ComponentRef Id="ScriptsComponent" />
+            <ComponentRef Id="VBoxUsbDriverComponent" />
+        </Feature>
+
+        <!-- 6. Custom Actions (Elevated PowerShell Execution) -->
+        <CustomAction Id="RunInstall" 
+                      Directory="ScriptsFolder" 
+                      ExeCommand="powershell.exe -ExecutionPolicy Bypass -NoProfile -File &quot;[ScriptsFolder]install.ps1&quot;" 
+                      Execute="deferred" Return="check" Impersonate="no" />
+
+        <CustomAction Id="RunUninstall" 
+                      Directory="ScriptsFolder" 
+                      ExeCommand="powershell.exe -ExecutionPolicy Bypass -NoProfile -File &quot;[ScriptsFolder]uninstall.ps1&quot;" 
+                      Execute="deferred" Return="ignore" Impersonate="no" />
+
+        <!-- 7. Execution Sequence -->
+        <InstallExecuteSequence>
+            <Custom Action="RunInstall" After="InstallFiles" Condition="NOT Installed" />
+            <Custom Action="RunUninstall" Before="RemoveFiles" Condition="Installed AND (REMOVE=&quot;ALL&quot;)" />
+        </InstallExecuteSequence>
+    </Package>
+</Wix>
