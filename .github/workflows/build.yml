@@ -1,0 +1,41 @@
+name: Release packages
+
+on:
+  push:
+    branches: [ master ]
+
+jobs:
+  build-windows:
+    runs-on: windows-2025
+    steps:
+
+      - name: Python setup
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.x'
+
+      - name: Python modules install
+        shell: cmd
+        run: |
+          pip install conan
+
+      - name: Checkout Source code
+        uses: actions/checkout@v2
+        with:
+          submodules: true
+          fetch-depth: 0
+          token: ${{ secrets.WHOLE_GITHUB_TOKEN }}
+
+      # The 3 explicitly required commands executing directly in the repository source layout
+      - name: Execute Project Build Pipeline
+        shell: powershell
+        working-directory: firebase/src
+        env:
+          GITHUB_TOKEN: ${{ secrets.WHOLE_GITHUB_TOKEN }}
+        run: |
+          $env:CONAN_HOME="C:\cr\"
+          
+          python ../conan-deps/src/conan-cache-generator.py --type windows_release --download --unpack
+          
+          python ../conan-deps/src/conan-cache-generator.py --build-project --type windows_release
+

@@ -253,21 +253,21 @@ int main(int argc, char* argv[]) {
         target_gui.setButtonsEnabled(false); // Dim and disable buttons
         target_gui.setLabelText("Detaching all remote USB devices...");
 
-        if (remote_usb_triggered && g_usbip) {
+       /* if (remote_usb_triggered && g_usbip) {
           g_usbip->shutdown();
           delete g_usbip;
           g_usbip = nullptr;
         }
         is_usbip_busy = false;
-        target_gui.setButtonsEnabled(true);
+        target_gui.setButtonsEnabled(true);*/
         
-        //std::thread([&target_gui]() {
-        //    if (g_usbip) {
-        //        g_usbip->executeCommand({"detach", "-a"});
-        //    }
-        //    is_usbip_busy = false;
-        //    target_gui.setButtonsEnabled(true); // Re-enable buttons and restore colors
-        //}).detach();
+        std::thread([&target_gui]() {
+            if (g_usbip) {
+                g_usbip->executeCommand({"detach", "-a"});
+            }
+            is_usbip_busy = false;
+            target_gui.setButtonsEnabled(true); // Re-enable buttons and restore colors
+        }).detach();
     });
 
     // 5. Logs
