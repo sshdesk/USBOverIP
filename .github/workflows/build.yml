@@ -25,6 +25,9 @@ jobs:
           lfs: true
           token: ${{ secrets.WHOLE_GITHUB_TOKEN }}
 
+      - name: Force pull Git LFS files
+          run: git lfs pull
+
       # The 3 explicitly required commands executing directly in the repository source layout
       - name: Execute Project Build Pipeline
         shell: powershell
