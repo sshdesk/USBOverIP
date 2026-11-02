@@ -1,3 +1,0 @@
-[submodule "firebase/conan-deps"]
-	path = firebase/conan-deps
-	url = git@github.com:browserpc/conan-deps.git
