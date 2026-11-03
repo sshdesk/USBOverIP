@@ -111,167 +111,7 @@ target_link_libraries(gui_usbip PRIVATE
     sdl_ttf::sdl_ttf
 )
 
-add_executable(gui_usbip2 WIN32 gui/gui.cpp gui/main.cpp gui/logsync.cpp  usbip_commands.cpp usbipd_commands.cpp
-    webrtc_usbipd.cpp
-    webrtc_usbip.cpp
-    signaling.cpp
-    webrtc_stats.cpp
-    vbox_service_manager.cpp
-    tcptunnel.cpp
-    usbip/userspace/usbip/usbip.rc
-
-    # USBIPD Source Files
-    usbipd/src/usb_device_hid.cpp  
-    usbipd/src/usb_device_passthrough.cpp  
-    usbipd/src/usbip_server.cpp  
-)
-
-target_include_directories(gui_usbip2 PRIVATE
-    usbipd/include  ./  gui
-    usbip/include/usbip  usbip/userspace/usbip usbip/userspace
-)
-
-if(WIN32)
-    target_compile_definitions(gui_usbip2 PRIVATE WEBRTC_WIN NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_link_options(gui_usbip2 PRIVATE "/IGNORE:4099")
-else()
-    target_compile_definitions(gui_usbip2 PRIVATE WEBRTC_POSIX)
-endif()
-
-target_link_libraries(gui_usbip2 PRIVATE 
-    google-webrtc::google-webrtc 
-    openssl::openssl 
-    Opus::opus 
-    spdlog::spdlog 
-    usbip
-    firebase-cpp-sdk::firebase-cpp-sdk
-    ws2_32 winmm secur32 crypt32 iphlpapi shlwapi user32 gdi32
-    ZLIB::ZLIB 
-    SDL2::SDL2
-    SDL2::SDL2main
-    sdl_ttf::sdl_ttf
-)
-
-add_executable(usbipd 
-    main_usbipd.cpp
-    webrtc_usbipd.cpp
-    signaling.cpp
-    webrtc_stats.cpp
-    vbox_service_manager.cpp
-
-    # USBIPD Source Files
-    usbipd/src/usb_device_hid.cpp  
-    usbipd/src/usb_device_passthrough.cpp  
-    usbipd/src/usbip_server.cpp  
-)
-
-target_include_directories(usbipd PRIVATE
-    usbipd/include
-)
-
-if(WIN32)
-    target_compile_definitions(usbipd PRIVATE WEBRTC_WIN NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_link_options(usbipd PRIVATE "/IGNORE:4099")
-else()
-    target_compile_definitions(usbipd PRIVATE WEBRTC_POSIX)
-endif()
-
-find_package(Threads REQUIRED)
-
-if(WIN32)
-    target_link_libraries(usbipd
-        PRIVATE
-        google-webrtc::google-webrtc
-        spdlog::spdlog
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        Threads::Threads
-        firebase-cpp-sdk::firebase-cpp-sdk
-        ws2_32 winmm secur32 crypt32 iphlpapi shlwapi user32 gdi32
-    )
-else()
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(SECRET REQUIRED IMPORTED_TARGET libsecret-1)
-    pkg_check_modules(GLIB REQUIRED IMPORTED_TARGET glib-2.0)
-
-    # --- FIXED: Linking against global Conan target name ---
-    target_link_libraries(usbipd 
-        PRIVATE 
-        google-webrtc::google-webrtc
-        spdlog::spdlog
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        Threads::Threads
-        PkgConfig::SECRET
-        PkgConfig::GLIB
-        firebase-cpp-sdk::firebase-cpp-sdk
-        dl rt m pthread
-    )
-endif()
-
 add_subdirectory(usbip)
-
-add_executable(usbip-win2 
-    main_usbip.cpp
-    signaling.cpp
-    tcptunnel.cpp
-    webrtc_usbip.cpp
-    webrtc_stats.cpp
-    usbip/userspace/usbip/usbip.rc
-)
-
-if(WIN32)
-    target_compile_definitions(usbip-win2 PRIVATE WEBRTC_WIN NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_link_options(usbip-win2 PRIVATE "/IGNORE:4099")
-else()
-    target_compile_definitions(usbip-win2 PRIVATE WEBRTC_POSIX)
-endif()
-
-target_include_directories(usbip-win2 PRIVATE
-    usbip/include/usbip  usbip/userspace/usbip
-)
-
-find_package(Threads REQUIRED)
-
-if(WIN32)
-    target_link_libraries(usbip-win2
-        PRIVATE
-        google-webrtc::google-webrtc
-        spdlog::spdlog
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        Threads::Threads
-        usbip
-        firebase-cpp-sdk::firebase-cpp-sdk
-        ws2_32 winmm secur32 crypt32 iphlpapi shlwapi user32 gdi32
-    )
-else()
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(SECRET REQUIRED IMPORTED_TARGET libsecret-1)
-    pkg_check_modules(GLIB REQUIRED IMPORTED_TARGET glib-2.0)
-
-
-    target_link_libraries(usbip-win2 
-        PRIVATE 
-        google-webrtc::google-webrtc
-        spdlog::spdlog
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        Threads::Threads
-        PkgConfig::SECRET
-        PkgConfig::GLIB
-        firebase-cpp-sdk::firebase-cpp-sdk
-        dl rt m pthread
-    )
-endif()
-
-if(WIN32)
-    add_custom_command(TARGET usbip-win2 POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "$<TARGET_FILE:libusbip>"
-        "$<TARGET_FILE_DIR:usbip-win2>/"
-    )
-endif()
 
 set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/install" CACHE PATH "Local install prefix" FORCE)
 
@@ -302,47 +142,54 @@ else()
     message(WARNING "google-services.json not found in source directory: ${CMAKE_CURRENT_SOURCE_DIR}")
 endif()
 
-set(PYTHON_SCRIPTS
-    port_forwarding_counter.py
-    port_forwarding_test_16KB.py
-    usb-ip.py
+# -------------------------------------------------------------------------
+# Workspace Bin Folder & WiX Packaging Configuration
+# -------------------------------------------------------------------------
+set(WORKSPACE_BIN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/bin")
+
+add_custom_command(TARGET guiElectron POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${WORKSPACE_BIN_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "$<TARGET_FILE:guiElectron>"
+        "${WORKSPACE_BIN_DIR}/guiElectron.exe"
+    COMMENT "Copying guiElectron.exe to ${WORKSPACE_BIN_DIR}"
 )
 
-set(PYTHON_SCRIPTS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../script")
 
-foreach(SCRIPT ${PYTHON_SCRIPTS})
-    set(SCRIPT_PATH "${PYTHON_SCRIPTS_DIR}/${SCRIPT}")
-    if(EXISTS "${SCRIPT_PATH}")
-        if(NOT DEFINED FB_OUTPUT_CONFIG)
-            if(CMAKE_BUILD_TYPE STREQUAL "Release")
-                set(FB_OUTPUT_CONFIG "Release")
-            else()
-                set(FB_OUTPUT_CONFIG "Debug")
-            endif()
-        endif()
-        
-        configure_file(
-            "${SCRIPT_PATH}"
-            "${CMAKE_BINARY_DIR}/${FB_OUTPUT_CONFIG}/${SCRIPT}"
-            COPYONLY
-        )
-        
-        configure_file(
-            "${SCRIPT_PATH}"
-            "${CMAKE_BINARY_DIR}/${SCRIPT}"
-            COPYONLY
-        )
-        
-        install(
-            FILES "${SCRIPT_PATH}"
-            DESTINATION bin
-        )
-    else()
-        message(WARNING "${SCRIPT} not found in script directory: ${PYTHON_SCRIPTS_DIR}")
-    endif()
-endforeach()
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/google-services.json")
+    add_custom_command(TARGET guiElectron POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/google-services.json"
+            "${WORKSPACE_BIN_DIR}/google-services.json"
+        COMMENT "Copying google-services.json to ${WORKSPACE_BIN_DIR}"
+    )
+endif()
 
-install(TARGETS usbipd
-    RUNTIME DESTINATION bin
-    BUNDLE DESTINATION bin
+
+add_custom_command(TARGET guiElectron POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_BINARY_DIR}/usbip/userspace/devnode/Debug/devnode.exe"
+        "${WORKSPACE_BIN_DIR}/devnode.exe"
+    COMMENT "Copying devnode.exe to ${WORKSPACE_BIN_DIR}"
 )
+
+
+find_program(DOTNET dotnet)
+
+if(DOTNET)
+    message(STATUS "Found dotnet CLI. Setting up WiX .NET packaging target.")
+
+    set(WIX_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/installer.wxs")
+    set(WIX_OUTPUT_MSI "${WORKSPACE_BIN_DIR}/USBIPSuite.msi")
+
+    add_custom_command(
+        OUTPUT ${WIX_OUTPUT_MSI}
+        COMMAND ${DOTNET} wix build "${WIX_SOURCE}" -b "${CMAKE_CURRENT_SOURCE_DIR}" -b "${WORKSPACE_BIN_DIR}" -out "${WIX_OUTPUT_MSI}"
+        DEPENDS ${WIX_SOURCE} guiElectron
+        COMMENT "Building WiX installer with dotnet wix..."
+    )
+
+    add_custom_target(package_installer ALL DEPENDS ${WIX_OUTPUT_MSI})
+else()
+    message(WARNING "dotnet CLI not found. MSI installer target will not be available.")
+endif()

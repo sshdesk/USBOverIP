@@ -19,6 +19,11 @@ jobs:
         run: |
           pip install conan
 
+      - name: Setup .NET Core
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
       # We must turn off the checkout token optimization to allow Git LFS to authenticate correctly
       - name: Checkout Source code
         uses: actions/checkout@v4
@@ -27,14 +32,23 @@ jobs:
           persist-credentials: true
           token: ${{ secrets.WHOLE_GITHUB_TOKEN }}
 
-      # Fixed syntax: Added proper shell and fixed indentation block
       - name: Force pull Git LFS files
         shell: bash
         run: |
           git lfs install
           git lfs pull
 
-      # The 3 explicitly required commands executing directly in the repository source layout
+
+      - name: Install .NET WiX Toolset
+        shell: powershell
+        working-directory: firebase/src
+        run: |
+          dotnet new tool-manifest --force
+          dotnet tool install wix
+          dotnet wix eula accept wix7
+          dotnet wix --version
+
+
       - name: Execute Project Build Pipeline
         shell: powershell
         working-directory: firebase/src
@@ -46,3 +60,5 @@ jobs:
           python ../conan-deps/src/conan-cache-generator.py --type windows_release --download --unpack
           
           python ../conan-deps/src/conan-cache-generator.py --build-project --type windows_release
+
+          cmake --build build-cache-windows_release --config Release --target package_installer

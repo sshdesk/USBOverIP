@@ -1,49 +1,39 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
-    <Package Name="USBIP Suite &amp; Drivers" Language="1033" Version="1.0.0.0" Manufacturer="YourCompany" UpgradeCode="6052eb43-9a01-4f89-beed-7f8bfb01689f" InstallerVersion="500" Scope="perMachine">
+    <Package Name="USBIPElectron Suite &amp; Drivers" Language="1033" Version="1.0.0.0" Manufacturer="stim.io" UpgradeCode="6052eb43-9a01-4f89-beed-7f8bfb01689f" InstallerVersion="500" Scope="perMachine">
 
         <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
         <MediaTemplate EmbedCab="yes" />
 
         <!-- 1. Directory Structure -->
         <StandardDirectory Id="ProgramFilesFolder">
-            <Directory Id="INSTALLFOLDER" Name="USBIPSuite">
+            <Directory Id="INSTALLFOLDER" Name="USBIPElectron">
                 <Directory Id="AppFolder" Name="bin" />
-                <Directory Id="FontsFolderSub" Name="fonts" />
-                <Directory Id="ResourcesFolder" Name="resources" />
                 <Directory Id="ScriptsFolder" Name="scripts" />
                 <Directory Id="DriversFolder" Name="drivers" />
             </Directory>
         </StandardDirectory>
 
-        <!-- 2. Application Files & Assets Components -->
+        <!-- 2. Application Files Component (Binary, json, devnode.exe in bin/) -->
         <DirectoryRef Id="AppFolder">
             <Component Id="AppBinaryComponent" Guid="ab9a2614-0ab2-4e0d-a78c-3b4a2bbbe62a">
-                <File Id="GuiExe" Source="app\usbip-gui.exe" KeyPath="yes" />
-            </Component>
-        </DirectoryRef>
-
-        <DirectoryRef Id="FontsFolderSub">
-            <Component Id="AppFontsComponent" Guid="63c520f3-257c-4c07-bd89-fb17b672eee2">
-                <File Id="CustomFont" Source="app\fonts\custom-font.ttf" KeyPath="yes" />
-            </Component>
-        </DirectoryRef>
-
-        <DirectoryRef Id="ResourcesFolder">
-            <Component Id="AppResourcesComponent" Guid="b492497e-7604-4ac6-8699-205f06396147">
-                <File Id="LogoPng" Source="app\resources\logo.png" KeyPath="yes" />
+                <File Id="GuiExe" Source="bin\guiElectron.exe" KeyPath="yes" />
+                <File Id="GoogleServicesJson" Source="bin\google-services.json" />
+                <File Id="DevNodeExe" Source="bin\devnode.exe" />
             </Component>
         </DirectoryRef>
 
         <!-- 3. PowerShell Scripts Component -->
         <DirectoryRef Id="ScriptsFolder">
             <Component Id="ScriptsComponent" Guid="c3c43b98-8e0b-428f-9694-7c19aa18da4f">
-                <File Id="InstallScript" Source="install.ps1" KeyPath="yes" />
-                <File Id="UninstallScript" Source="uninstall.ps1" />
+                <File Id="UsbipdInstallScript" Source="usbipd\drivers\install_usbipd_drivers.ps1" KeyPath="yes" />
+                <File Id="UsbipdUninstallScript" Source="usbipd\drivers\uninstall_usbipd_drivers.ps1" />
+                <File Id="UsbipInstallScript" Source="usbip\drivers\install_usbip_drivers.ps1" />
+                <File Id="UsbipUninstallScript" Source="usbip\drivers\uninstall_usbip_drivers.ps1" />
             </Component>
         </DirectoryRef>
 
-        <!-- 4. Driver Files Component -->
+        <!-- 4. Driver Files Components -->
         <DirectoryRef Id="DriversFolder">
             <Component Id="VBoxUsbDriverComponent" Guid="66986af1-4c4b-4f8f-abc4-3541ce544a1c">
                 <File Id="VBoxUSBInf" Source="usbipd\drivers\VBoxUSB.inf" KeyPath="yes" />
@@ -52,32 +42,52 @@
                 <File Id="VBoxUSBMonSys" Source="usbipd\drivers\VBoxUSBMon.sys" />
                 <File Id="VBoxUsbPnf" Source="usbipd\drivers\vboxusb.PNF" />
             </Component>
+            <Component Id="UsbIpDriverComponent" Guid="a89b2515-1bc3-4f9e-bd9d-4c5bfa02798e">
+                <File Id="UsbIp2UdeInf" Source="usbip\drivers\usbip2_ude.inf" KeyPath="yes" />
+                <File Id="UsbIp2UdeCat" Source="usbip\drivers\usbip2_ude.cat" />
+                <File Id="UsbIp2UdeSys" Source="usbip\drivers\usbip2_ude.sys" />
+                <File Id="UsbIp2FilterInf" Source="usbip\drivers\usbip2_filter.inf" />
+                <File Id="UsbIp2FilterCat" Source="usbip\drivers\usbip2_filter.cat" />
+                <File Id="UsbIp2FilterSys" Source="usbip\drivers\usbip2_filter.sys" />
+            </Component>
         </DirectoryRef>
 
         <!-- 5. Feature Definition -->
-        <Feature Id="ProductFeature" Title="USBIP Suite" Level="1">
+        <Feature Id="ProductFeature" Title="USBIPElectron Suite" Level="1">
             <ComponentRef Id="AppBinaryComponent" />
-            <ComponentRef Id="AppFontsComponent" />
-            <ComponentRef Id="AppResourcesComponent" />
             <ComponentRef Id="ScriptsComponent" />
             <ComponentRef Id="VBoxUsbDriverComponent" />
+            <ComponentRef Id="UsbIpDriverComponent" />
         </Feature>
 
-        <!-- 6. Custom Actions (Elevated PowerShell Execution) -->
-        <CustomAction Id="RunInstall" 
+        <!-- 6. Custom Actions (Elevated PowerShell Execution for both sets of drivers) -->
+        <CustomAction Id="RunInstallUsbipd" 
                       Directory="ScriptsFolder" 
-                      ExeCommand="powershell.exe -ExecutionPolicy Bypass -NoProfile -File &quot;[ScriptsFolder]install.ps1&quot;" 
+                      ExeCommand="powershell.exe -ExecutionPolicy Bypass -NoProfile -File &quot;[ScriptsFolder]install_usbipd_drivers.ps1&quot;" 
                       Execute="deferred" Return="check" Impersonate="no" />
 
-        <CustomAction Id="RunUninstall" 
+        <CustomAction Id="RunInstallUsbip" 
                       Directory="ScriptsFolder" 
-                      ExeCommand="powershell.exe -ExecutionPolicy Bypass -NoProfile -File &quot;[ScriptsFolder]uninstall.ps1&quot;" 
+                      ExeCommand="powershell.exe -ExecutionPolicy Bypass -NoProfile -File &quot;[ScriptsFolder]install_usbip_drivers.ps1&quot;" 
+                      Execute="deferred" Return="check" Impersonate="no" />
+
+        <CustomAction Id="RunUninstallUsbipd" 
+                      Directory="ScriptsFolder" 
+                      ExeCommand="powershell.exe -ExecutionPolicy Bypass -NoProfile -File &quot;[ScriptsFolder]uninstall_usbipd_drivers.ps1&quot;" 
+                      Execute="deferred" Return="ignore" Impersonate="no" />
+
+        <CustomAction Id="RunUninstallUsbip" 
+                      Directory="ScriptsFolder" 
+                      ExeCommand="powershell.exe -ExecutionPolicy Bypass -NoProfile -File &quot;[ScriptsFolder]uninstall_usbip_drivers.ps1&quot;" 
                       Execute="deferred" Return="ignore" Impersonate="no" />
 
         <!-- 7. Execution Sequence -->
         <InstallExecuteSequence>
-            <Custom Action="RunInstall" After="InstallFiles" Condition="NOT Installed" />
-            <Custom Action="RunUninstall" Before="RemoveFiles" Condition="Installed AND (REMOVE=&quot;ALL&quot;)" />
+            <Custom Action="RunInstallUsbipd" After="InstallFiles" Condition="NOT Installed" />
+            <Custom Action="RunInstallUsbip" After="RunInstallUsbipd" Condition="NOT Installed" />
+            
+            <Custom Action="RunUninstallUsbipd" Before="RemoveFiles" Condition="Installed AND (REMOVE=&quot;ALL&quot;)" />
+            <Custom Action="RunUninstallUsbip" Before="RunUninstallUsbipd" Condition="Installed AND (REMOVE=&quot;ALL&quot;)" />
         </InstallExecuteSequence>
     </Package>
 </Wix>

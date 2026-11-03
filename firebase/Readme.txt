@@ -1,28 +1,44 @@
-# widnows build process
 
-cmd 
-
-set GITHUB_TOKEN=ghp_*******************
-
-git submodule update --init
-
-cd src
+for release 
 
 
-$env:CONAN_HOME = "C:/cd/"
+$env:CONAN_HOME="C:\cr\"
+
+python ../conan-deps/src/conan-cache-generator.py --type windows_release --download --unpack
+
+python ../conan-deps/src/conan-cache-generator.py --build-project --type windows_release
+
+cmake -B build-cache-windows_release -S . -DCMAKE_BUILD_TYPE=Release
+cmake --build build-cache-windows_release --config Debug --target package_installer
 
 
-$profilePath = (Resolve-Path (Join-Path (Get-Location) "../conan-deps/src/profiles/windows_debug_z7")).Path
+for debug 
 
 
-conan install --requires="sdl/2.28.3" --requires="sdl_ttf/2.22.0" --profile:all=$profilePath --build=missing
-
+$env:CONAN_HOME="C:\cd\"
 
 python ../conan-deps/src/conan-cache-generator.py --type windows_debug --download --unpack
 
 python ../conan-deps/src/conan-cache-generator.py --build-project --type windows_debug
 
 
+
+cmake -B build-cache-windows_debug -S . -DCMAKE_BUILD_TYPE=Debug
+cmake --build build-cache-windows_debug --config Debug --target package_installer
+
+
+cd E:\workspace\shared-usb\firebase\src
+python ../conan-deps/src/conan-cache-generator.py --build-project --type windows_debug
+cd build-cache-windows_debug
+
+
+dotnet new tool-manifest
+
+dotnet tool install wix
+
+wix --version
+
+dotnet wix eula accept wix7
 
 # to start usbipd 
 
