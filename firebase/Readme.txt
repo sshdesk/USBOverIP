@@ -25,6 +25,7 @@ python ../conan-deps/src/conan-cache-generator.py --build-project --type windows
 
 cmake -B build-cache-windows_debug -S . -DCMAKE_BUILD_TYPE=Debug
 cmake --build build-cache-windows_debug --config Debug --target package_installer
+ cmake --build build-cache-windows_debug --config Debug --target package_all_installers
 
 
 cd E:\workspace\shared-usb\firebase\src

@@ -143,10 +143,11 @@ else()
 endif()
 
 # -------------------------------------------------------------------------
-# Workspace Bin Folder & WiX Packaging Configuration
+# Shared Workspace Bin Folder & WiX Packaging Configuration
 # -------------------------------------------------------------------------
 set(WORKSPACE_BIN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/bin")
 
+# --- 1. guiElectron Staging Commands (Shared bin) ---
 add_custom_command(TARGET guiElectron POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "${WORKSPACE_BIN_DIR}"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -154,7 +155,6 @@ add_custom_command(TARGET guiElectron POST_BUILD
         "${WORKSPACE_BIN_DIR}/guiElectron.exe"
     COMMENT "Copying guiElectron.exe to ${WORKSPACE_BIN_DIR}"
 )
-
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/google-services.json")
     add_custom_command(TARGET guiElectron POST_BUILD
@@ -165,36 +165,65 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/google-services.json")
     )
 endif()
 
-
-
 add_custom_command(TARGET guiElectron POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "$<TARGET_FILE:devnode>"
         "${WORKSPACE_BIN_DIR}/devnode.exe"
     COMMENT "Copying devnode.exe to ${WORKSPACE_BIN_DIR}"
 )
+add_dependencies(guiElectron devnode)
 
 
+# --- 2. gui_usbip Staging Commands (Shared bin) ---
+add_custom_command(TARGET gui_usbip POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${WORKSPACE_BIN_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "$<TARGET_FILE:gui_usbip>"
+        "${WORKSPACE_BIN_DIR}/gui_usbip.exe"
+    COMMENT "Copying gui_usbip.exe to ${WORKSPACE_BIN_DIR}"
+)
+
+add_custom_command(TARGET gui_usbip POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "$<TARGET_FILE:devnode>"
+        "${WORKSPACE_BIN_DIR}/devnode.exe"
+    COMMENT "Copying devnode.exe to ${WORKSPACE_BIN_DIR}"
+)
+add_dependencies(gui_usbip devnode)
 
 
-
+# --- 3. WiX MSI Builders ---
 find_program(DOTNET dotnet)
 
 if(DOTNET)
-    message(STATUS "Found dotnet CLI. Setting up WiX .NET packaging target.")
+    message(STATUS "Found dotnet CLI. Setting up WiX .NET packaging targets.")
 
-    set(WIX_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/installer.wxs")
-    set(WIX_OUTPUT_MSI "${WORKSPACE_BIN_DIR}/USBIPElectron.msi")
+    # Target 1: USBIPElectron.msi (uses guiElectron.exe)
+    set(WIX_SOURCE_ELECTRON "${CMAKE_CURRENT_SOURCE_DIR}/installer.wxs")
+    set(WIX_OUTPUT_MSI_ELECTRON "${WORKSPACE_BIN_DIR}/USBIPElectron.msi")
 
     add_custom_command(
-        OUTPUT ${WIX_OUTPUT_MSI}
-        COMMAND ${DOTNET} wix build "${WIX_SOURCE}" -b "${CMAKE_CURRENT_SOURCE_DIR}" -b "${WORKSPACE_BIN_DIR}" -o "${WIX_OUTPUT_MSI}"
-        DEPENDS ${WIX_SOURCE} guiElectron
+        OUTPUT ${WIX_OUTPUT_MSI_ELECTRON}
+        COMMAND ${DOTNET} wix build "${WIX_SOURCE_ELECTRON}" -b "${CMAKE_CURRENT_SOURCE_DIR}" -b "${WORKSPACE_BIN_DIR}" -o "${WIX_OUTPUT_MSI_ELECTRON}"
+        DEPENDS ${WIX_SOURCE_ELECTRON} guiElectron devnode
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        COMMENT "Building WiX installer with dotnet wix..."
+        COMMENT "Building USBIPElectron.msi..."
     )
 
-    add_custom_target(package_installer ALL DEPENDS ${WIX_OUTPUT_MSI})
+    # Target 2: USBIPGui.msi (uses gui_usbip.exe)
+    set(WIX_SOURCE_GUI "${CMAKE_CURRENT_SOURCE_DIR}/gui_installer.wxs")
+    set(WIX_OUTPUT_MSI_GUI "${WORKSPACE_BIN_DIR}/USBIPGui.msi")
+
+    add_custom_command(
+        OUTPUT ${WIX_OUTPUT_MSI_GUI}
+        COMMAND ${DOTNET} wix build "${WIX_SOURCE_GUI}" -b "${CMAKE_CURRENT_SOURCE_DIR}" -b "${WORKSPACE_BIN_DIR}" -o "${WIX_OUTPUT_MSI_GUI}"
+        DEPENDS ${WIX_SOURCE_GUI} gui_usbip devnode
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        COMMENT "Building USBIPGui.msi..."
+    )
+
+    # Combined master target to generate both MSIs into /bin
+    add_custom_target(package_all_installers ALL DEPENDS ${WIX_OUTPUT_MSI_ELECTRON} ${WIX_OUTPUT_MSI_GUI})
 else()
-    message(WARNING "dotnet CLI not found. MSI installer target will not be available.")
+    message(WARNING "dotnet CLI not found. MSI installer targets will not be available.")
 endif()
