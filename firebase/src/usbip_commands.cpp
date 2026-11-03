@@ -285,12 +285,12 @@ int UsbIpCommands::executeCLI(int argc, wchar_t *argv[]) {
   log::init();
   libusbip::set_debug_output(libusbip_spdlog_bridge);
 
-  if (!get_resource_module()) {
+ /* if (!get_resource_module()) {
     auto err = GetLastError();
     log::critical("can't load '{}.dll', error {:#x} {}", "resources", err,
                   format_message(err));
     return EXIT_FAILURE;
-  }
+  }*/
 
   InitWinSock2 ws2;
   if (!ws2) {

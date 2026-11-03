@@ -9,14 +9,11 @@
 # - Use -RemoveCustomDriverFiles to remove the custom Program Files folder too.
 
 #Requires -Version 5.1
-[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = "High")]
 param([switch]$RemoveCustomDriverFiles)
 
 $ErrorActionPreference = "Stop"
-$InstallDir = Join-Path ${env:ProgramFiles} "USBIP-Passthrough"
-$BinDir = Join-Path $InstallDir "bin"
+$InstallDir = Join-Path ${env:ProgramFiles} "USBIP"
 $InstalledMonSys = Join-Path $env:WINDIR "System32\VBoxUSBMon.sys"
-$FirewallName = "USBIP Passthrough Server (TCP 3240)"
 $ServiceName = "VBoxUSBMon"
 
 function Is-Administrator {
@@ -34,7 +31,6 @@ if (-not (Is-Administrator)) {
     try {
         $args = '-NoProfile -ExecutionPolicy Bypass -File "' + $PSCommandPath + '"'
         if ($RemoveCustomDriverFiles) { $args += ' -RemoveCustomDriverFiles' }
-        if ($WhatIfPreference) { $args += ' -WhatIf' }
         Start-Process powershell.exe -Verb RunAs -ArgumentList $args -Wait
         exit $LASTEXITCODE
     } catch {
@@ -50,31 +46,24 @@ Write-Host "-------------------------------------" -ForegroundColor White
 Warn "This removes the custom setup only; it does not uninstall VirtualBox or usbipd-win."
 Write-Host ""
 
-# Remove installer-created firewall rule.
-try {
-    $rules = Get-NetFirewallRule -DisplayName $FirewallName -ErrorAction SilentlyContinue
-    if ($rules) {
-        if ($PSCmdlet.ShouldProcess($FirewallName, "Remove Windows Firewall rule")) {
-            $rules | Remove-NetFirewallRule
-            Ok "Removed firewall rule."
-        }
-    } else { Info "Firewall rule not present." }
-} catch { Warn "Could not remove firewall rule: $($_.Exception.Message)" }
+# Remove installer-created firewall rules.
+$FirewallRulesToRemove = @(
+    "USBIP Passthrough Server (TCP 3240)",
+    "USBIP GUI Electron (All TCP In)",
+    "USBIP GUI Electron (All UDP In)",
+    "USBIP GUI Win32 (All TCP In)",
+    "USBIP GUI Win32 (All UDP In)"
+)
 
-# Remove only the custom bin directory from machine PATH.
-try {
-    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
-    if ($machinePath) {
-        $entries = @($machinePath -split ";" | Where-Object {
-            $_ -and $_.Trim() -and ($_.TrimEnd("\") -ine $BinDir.TrimEnd("\"))
-        })
-        $newPath = $entries -join ";"
-        if ($newPath -ne $machinePath -and $PSCmdlet.ShouldProcess("Machine PATH", "Remove $BinDir")) {
-            [Environment]::SetEnvironmentVariable("Path", $newPath, "Machine")
-            Ok "Removed server directory from system PATH."
-        } else { Info "Server directory was not present in system PATH." }
-    }
-} catch { Warn "Could not update PATH: $($_.Exception.Message)" }
+foreach ($ruleName in $FirewallRulesToRemove) {
+    try {
+        $rules = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
+        if ($rules) {
+            $rules | Remove-NetFirewallRule
+            Ok "Removed firewall rule: $ruleName"
+        }
+    } catch { Warn "Could not remove firewall rule $ruleName : $($_.Exception.Message)" }
+}
 
 # Remove VBoxUSBMon service only if its binary path matches our installer's copy.
 try {
@@ -84,18 +73,14 @@ try {
         $normalized = $servicePath.Replace("\??\", "").Replace("\\?\", "")
         if ($normalized -ieq $InstalledMonSys) {
             Warn "VBoxUSBMon service points to the installer-managed file: $servicePath"
-            if ($PSCmdlet.ShouldProcess("VBoxUSBMon", "Stop and delete kernel service")) {
-                & sc.exe stop $ServiceName 2>&1 | ForEach-Object { Write-Host "    $_" }
-                & sc.exe delete $ServiceName 2>&1 | ForEach-Object { Write-Host "    $_" }
-                Ok "Requested removal of VBoxUSBMon service registration."
-                if (Test-Path -LiteralPath $InstalledMonSys) {
-                    try {
-                        if ($PSCmdlet.ShouldProcess($InstalledMonSys, "Delete copied driver binary")) {
-                            Remove-Item -LiteralPath $InstalledMonSys -Force
-                            Ok "Removed copied VBoxUSBMon.sys."
-                        }
-                    } catch { Warn "Could not delete driver binary (it may be in use): $($_.Exception.Message)" }
-                }
+            & sc.exe stop $ServiceName 2>&1 | ForEach-Object { Write-Host "    $_" }
+            & sc.exe delete $ServiceName 2>&1 | ForEach-Object { Write-Host "    $_" }
+            Ok "Requested removal of VBoxUSBMon service registration."
+            if (Test-Path -LiteralPath $InstalledMonSys) {
+                try {
+                    Remove-Item -LiteralPath $InstalledMonSys -Force
+                    Ok "Removed copied VBoxUSBMon.sys."
+                } catch { Warn "Could not delete driver binary (it may be in use): $($_.Exception.Message)" }
             }
         } else {
             Warn "VBoxUSBMon points to '$servicePath', not '$InstalledMonSys'. Leaving it untouched."
@@ -103,20 +88,18 @@ try {
     } else { Info "VBoxUSBMon service not found." }
 } catch { Warn "Could not clean up VBoxUSBMon service: $($_.Exception.Message)" }
 
-# Remove custom install folder only if explicitly requested.
+# Remove custom install folder if present or requested.
 if ($RemoveCustomDriverFiles) {
     if (Test-Path -LiteralPath $InstallDir) {
-        if ($PSCmdlet.ShouldProcess($InstallDir, "Delete custom installation directory")) {
-            try {
-                Remove-Item -LiteralPath $InstallDir -Recurse -Force
-                Ok "Removed $InstallDir"
-            } catch { Warn "Could not completely remove install directory: $($_.Exception.Message)" }
-        }
+        try {
+            Remove-Item -LiteralPath $InstallDir -Recurse -Force
+            Ok "Removed $InstallDir"
+        } catch { Warn "Could not completely remove install directory: $($_.Exception.Message)" }
     } else { Info "Custom install directory not found." }
 } else {
     Warn "Kept $InstallDir and its copied files."
     Write-Host "To remove that folder too, run:"
-    Write-Host "  .\uninstall_usbip_passthrough.ps1 -RemoveCustomDriverFiles"
+    Write-Host "  .\uninstall_usbipd_drivers.ps1 -RemoveCustomDriverFiles"
 }
 
 Write-Host ""

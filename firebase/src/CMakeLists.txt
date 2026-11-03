@@ -115,6 +115,13 @@ add_subdirectory(usbip)
 
 set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/install" CACHE PATH "Local install prefix" FORCE)
 
+# Copy assets to build directory
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/gui/assets")
+    file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/gui/assets" DESTINATION "${CMAKE_BINARY_DIR}")
+else()
+    message(WARNING "gui/assets folder not found in source directory: ${CMAKE_CURRENT_SOURCE_DIR}")
+endif()
+
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/google-services.json")
     if(CMAKE_BUILD_TYPE STREQUAL "Release")
         set(FB_OUTPUT_CONFIG "Release")
@@ -183,13 +190,24 @@ add_custom_command(TARGET gui_usbip POST_BUILD
     COMMENT "Copying gui_usbip.exe to ${WORKSPACE_BIN_DIR}"
 )
 
+
+
 add_custom_command(TARGET gui_usbip POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_SOURCE_DIR}/usbip/drivers"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "$<TARGET_FILE:devnode>"
-        "${WORKSPACE_BIN_DIR}/devnode.exe"
-    COMMENT "Copying devnode.exe to ${WORKSPACE_BIN_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/usbip/drivers/devnode.exe"
+    COMMENT "Copying devnode.exe to usbip/drivers..."
 )
 add_dependencies(gui_usbip devnode)
+
+# Copy assets directory to ./bin/assets
+add_custom_command(TARGET gui_usbip POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}/gui/assets"
+        "${WORKSPACE_BIN_DIR}/assets"
+    COMMENT "Copying gui/assets to ${WORKSPACE_BIN_DIR}/assets"
+)
 
 
 # --- 3. WiX MSI Builders ---
@@ -204,7 +222,7 @@ if(DOTNET)
 
     add_custom_command(
         OUTPUT ${WIX_OUTPUT_MSI_ELECTRON}
-        COMMAND ${DOTNET} wix build "${WIX_SOURCE_ELECTRON}" -b "${CMAKE_CURRENT_SOURCE_DIR}" -b "${WORKSPACE_BIN_DIR}" -o "${WIX_OUTPUT_MSI_ELECTRON}"
+        COMMAND ${DOTNET} wix build "${WIX_SOURCE_ELECTRON}" -arch x64 -b "${CMAKE_CURRENT_SOURCE_DIR}" -b "${WORKSPACE_BIN_DIR}" -o "${WIX_OUTPUT_MSI_ELECTRON}"
         DEPENDS ${WIX_SOURCE_ELECTRON} guiElectron devnode
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         COMMENT "Building USBIPElectron.msi..."
@@ -216,7 +234,7 @@ if(DOTNET)
 
     add_custom_command(
         OUTPUT ${WIX_OUTPUT_MSI_GUI}
-        COMMAND ${DOTNET} wix build "${WIX_SOURCE_GUI}" -b "${CMAKE_CURRENT_SOURCE_DIR}" -b "${WORKSPACE_BIN_DIR}" -o "${WIX_OUTPUT_MSI_GUI}"
+        COMMAND ${DOTNET} wix build "${WIX_SOURCE_GUI}" -arch x64 -b "${CMAKE_CURRENT_SOURCE_DIR}" -b "${WORKSPACE_BIN_DIR}" -o "${WIX_OUTPUT_MSI_GUI}"
         DEPENDS ${WIX_SOURCE_GUI} gui_usbip devnode
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         COMMENT "Building USBIPGui.msi..."
