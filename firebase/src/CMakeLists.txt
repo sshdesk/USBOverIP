@@ -166,12 +166,16 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/google-services.json")
 endif()
 
 
+
 add_custom_command(TARGET guiElectron POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_CURRENT_BINARY_DIR}/usbip/userspace/devnode/Debug/devnode.exe"
+        "$<TARGET_FILE:devnode>"
         "${WORKSPACE_BIN_DIR}/devnode.exe"
     COMMENT "Copying devnode.exe to ${WORKSPACE_BIN_DIR}"
 )
+
+
+
 
 
 find_program(DOTNET dotnet)
@@ -180,12 +184,13 @@ if(DOTNET)
     message(STATUS "Found dotnet CLI. Setting up WiX .NET packaging target.")
 
     set(WIX_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/installer.wxs")
-    set(WIX_OUTPUT_MSI "${WORKSPACE_BIN_DIR}/USBIPSuite.msi")
+    set(WIX_OUTPUT_MSI "${WORKSPACE_BIN_DIR}/USBIPElectron.msi")
 
     add_custom_command(
         OUTPUT ${WIX_OUTPUT_MSI}
-        COMMAND ${DOTNET} wix build "${WIX_SOURCE}" -b "${CMAKE_CURRENT_SOURCE_DIR}" -b "${WORKSPACE_BIN_DIR}" -out "${WIX_OUTPUT_MSI}"
+        COMMAND ${DOTNET} wix build "${WIX_SOURCE}" -b "${CMAKE_CURRENT_SOURCE_DIR}" -b "${WORKSPACE_BIN_DIR}" -o "${WIX_OUTPUT_MSI}"
         DEPENDS ${WIX_SOURCE} guiElectron
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         COMMENT "Building WiX installer with dotnet wix..."
     )
 
