@@ -61,7 +61,7 @@ jobs:
           
           python ../conan-deps/src/conan-cache-generator.py --build-project --type windows_release
 
-          cmake --build build-cache-windows_release --config Release --target package_all_installers
+          #cmake --build build-cache-windows_release --config Release --target package_all_installers
 
       - name: Upload MSI Installers to GitHub Release
         uses: softprops/action-gh-release@v2

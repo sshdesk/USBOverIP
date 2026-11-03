@@ -41,6 +41,20 @@ wix --version
 
 dotnet wix eula accept wix7
 
+
+
+Tag and push a test version (e.g., v1.0.0-test):
+git tag v1.0.0-test
+git push origin v1.0.0-test
+
+
+
+git tag -d v1.0.0-test
+git push origin --delete v1.0.0-test
+
+
+
+
 # to start usbipd 
 
 ./usbipd
