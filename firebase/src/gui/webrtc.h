@@ -8,14 +8,14 @@
 #include "api/data_channel_interface.h"
 #include "rtc_base/thread.h"
 
-void SendTargetedMessage(const std::string& room_id, const std::string& my_client_id, 
+void SendTargetedMessage(const std::string& token_id, const std::string& my_client_id, 
                           const std::string& target_client_id, const std::string& text_payload);
 
 class WebRtcManager {
 public:
     using DataChannelStateCallback = std::function<void(bool is_open)>;
 
-    WebRtcManager(const std::string& room_id, const std::string& client_id, bool is_Client);
+    WebRtcManager(const std::string& token_id, const std::string& client_id, bool is_Client);
     ~WebRtcManager();
 
     bool Initialize();

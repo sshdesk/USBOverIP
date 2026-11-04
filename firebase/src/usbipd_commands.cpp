@@ -75,7 +75,7 @@ void UsbIpdCommands::attachDataChannelCallback(WebRtcManager_usbipd* manager) {
     });
 }
 
-bool UsbIpdCommands::startHostSession(const std::string& room_id, const std::string& client_id) {
+bool UsbIpdCommands::startHostSession(const std::string& token_id, const std::string& client_id) {
     signaling_client = std::make_unique<SignalingClient>();
     if (!signaling_client->InitializeFramework()) {
         std::cerr << "Firebase setup crash exception encountered." << std::endl;

@@ -181,7 +181,7 @@ int main(int argc, char* argv[]) {
 
         if (line.rfind("SET_ROOM:", 0) == 0) {
             active_room_id = line.substr(9);
-            EmitEvent("ROOM_ID", active_room_id);
+            EmitEvent("TOKEN_ID", active_room_id);
         }
         else if (line == "HOST_LOCAL") {
             local_usb_triggered = true;
@@ -201,7 +201,7 @@ int main(int argc, char* argv[]) {
                     EmitEvent("ERROR", "Failed to initialize host sharing session");
                 } else {
                     EmitEvent("STATE", "Hosting local USB devices on room: " + active_room_id);
-                    EmitEvent("ROOM_ID", active_room_id);
+                    EmitEvent("TOKEN_ID", active_room_id);
                     EmitEvent("CLIENT_ID", global_client_id);
                 }
             }
@@ -225,7 +225,7 @@ int main(int argc, char* argv[]) {
                 delete g_usbip;
                 g_usbip = nullptr;
             } else {
-                EmitEvent("ROOM_ID", active_room_id);
+                EmitEvent("TOKEN_ID", active_room_id);
                 EmitEvent("CLIENT_ID", global_client_id);
             }
         }

@@ -69,7 +69,7 @@ window.bridge.onEvent((event) => {
       appendLog(`[ERROR] ${payload}`);
       break;
 
-    case 'ROOM_ID':
+    case 'TOKEN_ID':
       lblRoom.textContent = payload;
       if (!roomInput.value) roomInput.value = payload;
       break;

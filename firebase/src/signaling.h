@@ -40,16 +40,16 @@ public:
 
     // Config and Identity
     std::string GenerateRandomRoomId(size_t length = 20);
-    bool SaveConfigToDisk(const std::string& room_id, const std::string& log_level = "info", const std::string& filename = "config.txt");
+    bool SaveConfigToDisk(const std::string& token_id, const std::string& log_level = "info", const std::string& filename = "config.txt");
     void LoadConfigFromDisk(std::string& out_room_id, std::string& out_log_level, const std::string& filename = "config.txt");
 
     // Room Lifecycle & Role Assignment
-    void JoinRoom(const std::string& room_id, const std::string& my_client_id, RoleAssignedCallback on_role_assigned);
-    void HandleGracefulExit(const std::string& room_id, const std::string& my_client_id);
-    void PurgeOldMessages(const std::string& room_id);
+    void JoinRoom(const std::string& token_id, const std::string& my_client_id, RoleAssignedCallback on_role_assigned);
+    void HandleGracefulExit(const std::string& token_id, const std::string& my_client_id);
+    void PurgeOldMessages(const std::string& token_id);
 
     // Heartbeat Management (non-blocking background thread)
-    void StartHeartbeat(const std::string& room_id, const std::string& my_client_id);
+    void StartHeartbeat(const std::string& token_id, const std::string& my_client_id);
     void StopHeartbeat();
 
     // Event Registration
@@ -58,8 +58,8 @@ public:
     void RegisterOnIceReceivedEvent(IceReceivedCallback callback);
 
     // Messaging
-    void ListenForTargetedMessages(const std::string& room_id, const std::string& my_client_id);
-    void SendTargetedMessage(const std::string& room_id, const std::string& my_client_id, 
+    void ListenForTargetedMessages(const std::string& token_id, const std::string& my_client_id);
+    void SendTargetedMessage(const std::string& token_id, const std::string& my_client_id, 
                              const std::string& target_client_id, const std::string& text_payload);
 
     // Getters
@@ -89,7 +89,7 @@ private:
 // Global backward-compatible bridge for webrtc.cpp
 extern std::unique_ptr<SignalingClient> signaling_client;
 
-void SendTargetedMessage(const std::string& room_id, const std::string& my_client_id, 
+void SendTargetedMessage(const std::string& token_id, const std::string& my_client_id, 
                           const std::string& target_client_id, const std::string& text_payload);
 
 #endif // SIGNALING_H

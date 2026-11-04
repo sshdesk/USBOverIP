@@ -4,8 +4,8 @@
 #include <spdlog/spdlog.h>
 #include <vector>
 
-WebRtcManager::WebRtcManager(const std::string& room_id, const std::string& client_id, bool is_Client)
-    : room_id_(room_id), my_client_id_(client_id), is_Client(is_Client), pc_observer_(*this), dc_observer_(*this) {
+WebRtcManager::WebRtcManager(const std::string& token_id, const std::string& client_id, bool is_Client)
+    : room_id_(token_id), my_client_id_(client_id), is_Client(is_Client), pc_observer_(*this), dc_observer_(*this) {
     SPDLOG_INFO("[WebRTC Lifecycle] WebRtcManager instance constructed. Caller Status: {}", is_Client ? "TRUE" : "FALSE");
 }
 

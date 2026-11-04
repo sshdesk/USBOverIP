@@ -50,8 +50,8 @@ extern "C" {
     }
 }
 
-WebRtcManager_usbipd::WebRtcManager_usbipd(const std::string& room_id, const std::string& client_id, bool is_Client)
-    : room_id_(room_id), my_client_id_(client_id), is_Client(is_Client), pc_observer_(*this), dc_observer_(*this) {
+WebRtcManager_usbipd::WebRtcManager_usbipd(const std::string& token_id, const std::string& client_id, bool is_Client)
+    : room_id_(token_id), my_client_id_(client_id), is_Client(is_Client), pc_observer_(*this), dc_observer_(*this) {
     SPDLOG_INFO("[WebRTC Lifecycle] WebRtcManager_usbipd instance constructed. Caller Status: {}", is_Client ? "TRUE" : "FALSE");
 }
 

@@ -31,7 +31,7 @@ public:
     // Session Management
     void initializeServerSession();
     void shutdownServerSession();
-    bool startHostSession(const std::string& room_id, const std::string& client_id);
+    bool startHostSession(const std::string& token_id, const std::string& client_id);
     void shutdown();
 
     // Host Server Flag

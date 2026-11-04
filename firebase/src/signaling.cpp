@@ -18,10 +18,10 @@ using namespace firebase::firestore;
 // Define global signaling client pointer for external helper linkage
 std::unique_ptr<SignalingClient> signaling_client = nullptr;
 
-void SendTargetedMessage(const std::string& room_id, const std::string& my_client_id, 
+void SendTargetedMessage(const std::string& token_id, const std::string& my_client_id, 
                           const std::string& target_client_id, const std::string& text_payload) {
     if (signaling_client) {
-        signaling_client->SendTargetedMessage(room_id, my_client_id, target_client_id, text_payload);
+        signaling_client->SendTargetedMessage(token_id, my_client_id, target_client_id, text_payload);
     }
 }
 
@@ -97,13 +97,13 @@ std::string SignalingClient::GenerateRandomRoomId(size_t length) {
     return random_id;
 }
 
-bool SignalingClient::SaveConfigToDisk(const std::string& room_id, const std::string& log_level, const std::string& filename) {
+bool SignalingClient::SaveConfigToDisk(const std::string& token_id, const std::string& log_level, const std::string& filename) {
     std::ofstream configFile(filename);
     if (!configFile.is_open()) {
         SPDLOG_WARN("Could not open {} for writing.", filename);
         return false;
     }
-    configFile << "ROOM_ID=" << room_id << "\n";
+    configFile << "TOKEN_ID=" << token_id << "\n";
     configFile << "LOG_LEVEL=" << log_level << "\n";
     return true;
 }
@@ -122,7 +122,7 @@ void SignalingClient::LoadConfigFromDisk(std::string& out_room_id, std::string& 
         if (std::getline(is_line, key, '=')) {
             std::string value;
             if (std::getline(is_line, value)) {
-                if (key == "ROOM_ID") out_room_id = value;
+                if (key == "TOKEN_ID") out_room_id = value;
                 else if (key == "LOG_LEVEL") out_log_level = value;
             }
         }
@@ -140,9 +140,9 @@ void SignalingClient::DeleteCollectionRecursively(const CollectionReference& col
     });
 }
 
-void SignalingClient::PurgeOldMessages(const std::string& room_id) {
-    if (!db_ || room_id.empty()) return;
-    CollectionReference messages_ref = db_->Collection("rooms").Document(room_id).Collection("messages");
+void SignalingClient::PurgeOldMessages(const std::string& token_id) {
+    if (!db_ || token_id.empty()) return;
+    CollectionReference messages_ref = db_->Collection("rooms").Document(token_id).Collection("messages");
     DeleteCollectionRecursively(messages_ref);
 }
 
@@ -160,14 +160,14 @@ void SignalingClient::StopHeartbeat() {
     }
 }
 
-void SignalingClient::StartHeartbeat(const std::string& room_id, const std::string& my_client_id) {
+void SignalingClient::StartHeartbeat(const std::string& token_id, const std::string& my_client_id) {
     StopHeartbeat();
     std::lock_guard<std::mutex> lock(heartbeat_mutex_);
     heartbeat_active_ = true;
-    heartbeat_thread_ = std::make_unique<std::thread>([room_id, my_client_id, this]() {
+    heartbeat_thread_ = std::make_unique<std::thread>([token_id, my_client_id, this]() {
         while (heartbeat_active_) {
-            if (db_ && !room_id.empty() && !my_client_id.empty()) {
-                db_->Collection("rooms").Document(room_id).Collection("peers").Document(my_client_id).Set({
+            if (db_ && !token_id.empty() && !my_client_id.empty()) {
+                db_->Collection("rooms").Document(token_id).Collection("peers").Document(my_client_id).Set({
                     {"lastSeen", FieldValue::ServerTimestamp()}
                 });
             }
@@ -178,21 +178,21 @@ void SignalingClient::StartHeartbeat(const std::string& room_id, const std::stri
     });
 }
 
-void SignalingClient::JoinRoom(const std::string& room_id, const std::string& my_client_id, 
+void SignalingClient::JoinRoom(const std::string& token_id, const std::string& my_client_id, 
                                RoleAssignedCallback on_role_assigned) {
-    if (!db_ || room_id.empty() || my_client_id.empty()) return;
+    if (!db_ || token_id.empty() || my_client_id.empty()) return;
 
-    CollectionReference peers_ref = db_->Collection("rooms").Document(room_id).Collection("peers");
+    CollectionReference peers_ref = db_->Collection("rooms").Document(token_id).Collection("peers");
 
     // Start background presence loop
-    StartHeartbeat(room_id, my_client_id);
+    StartHeartbeat(token_id, my_client_id);
 
     // Initial presence write
     peers_ref.Document(my_client_id).Set({
         {"lastSeen", FieldValue::ServerTimestamp()}
-    }).OnCompletion([this, room_id, my_client_id, peers_ref, on_role_assigned](const firebase::Future<void>& set_future) {
+    }).OnCompletion([this, token_id, my_client_id, peers_ref, on_role_assigned](const firebase::Future<void>& set_future) {
         // Query peers collection to see who else is in the room
-        peers_ref.Get().OnCompletion([this, room_id, my_client_id, on_role_assigned](const firebase::Future<QuerySnapshot>& future) {
+        peers_ref.Get().OnCompletion([this, token_id, my_client_id, on_role_assigned](const firebase::Future<QuerySnapshot>& future) {
             if (future.status() != firebase::kFutureStatusComplete || future.error()) {
                 if (on_role_assigned) on_role_assigned(false, "");
                 return;
@@ -235,12 +235,12 @@ void SignalingClient::JoinRoom(const std::string& room_id, const std::string& my
 
             if (active_other_peers == 0) {
                 // First peer to join room: purge previous stale room messages and stand by as Callee
-                PurgeOldMessages(room_id);
-                SPDLOG_INFO("[JoinRoom] First peer in room [{}]. Role -> CALLEE (waiting for offer).", room_id);
+                PurgeOldMessages(token_id);
+                SPDLOG_INFO("[JoinRoom] First peer in room [{}]. Role -> CALLEE (waiting for offer).", token_id);
                 if (on_role_assigned) on_role_assigned(false, "");
             } else {
                 // Second peer to join: act as Caller and send offer to existing_peer_id
-                SPDLOG_INFO("[JoinRoom] Found active peer [{}] in room [{}]. Role -> CALLER.", existing_peer_id, room_id);
+                SPDLOG_INFO("[JoinRoom] Found active peer [{}] in room [{}]. Role -> CALLER.", existing_peer_id, token_id);
                 if (on_role_assigned) on_role_assigned(true, existing_peer_id);
             }
         });
@@ -251,13 +251,13 @@ void SignalingClient::RegisterOnPeerLeftEvent(PeerLeftCallback callback) { peer_
 void SignalingClient::RegisterOnSdpReceivedEvent(SdpReceivedCallback callback) { sdp_received_callback_ = callback; }
 void SignalingClient::RegisterOnIceReceivedEvent(IceReceivedCallback callback) { ice_received_callback_ = callback; }
 
-void SignalingClient::HandleGracefulExit(const std::string& room_id, const std::string& my_client_id) {
-    if (!db_ || room_id.empty()) return;
+void SignalingClient::HandleGracefulExit(const std::string& token_id, const std::string& my_client_id) {
+    if (!db_ || token_id.empty()) return;
     StopHeartbeat();
-    SendTargetedMessage(room_id, my_client_id, "ALL", "SYSTEM_EVENT: Goodbye! I have closed my connection.");
+    SendTargetedMessage(token_id, my_client_id, "ALL", "SYSTEM_EVENT: Goodbye! I have closed my connection.");
     
     if (!my_client_id.empty()) {
-        auto delete_future = db_->Collection("rooms").Document(room_id).Collection("peers").Document(my_client_id).Delete();
+        auto delete_future = db_->Collection("rooms").Document(token_id).Collection("peers").Document(my_client_id).Delete();
         
         // Wait up to 1.5 seconds for the network delete request to complete
         int elapsed_ms = 0;
@@ -268,18 +268,18 @@ void SignalingClient::HandleGracefulExit(const std::string& room_id, const std::
     }
 }
 
-void SignalingClient::ListenForTargetedMessages(const std::string& room_id, const std::string& my_client_id) {
-    if (!db_ || room_id.empty()) return;
+void SignalingClient::ListenForTargetedMessages(const std::string& token_id, const std::string& my_client_id) {
+    if (!db_ || token_id.empty()) return;
 
     int64_t session_start_ms = static_cast<int64_t>(GetCurrentEpochMs()) - 1000;
 
-    CollectionReference messages_ref = db_->Collection("rooms").Document(room_id).Collection("messages");
+    CollectionReference messages_ref = db_->Collection("rooms").Document(token_id).Collection("messages");
     std::vector<FieldValue> allowed_targets = { FieldValue::String("ALL"), FieldValue::String(my_client_id) };
     Query targeted_query = messages_ref.WhereIn("targetId", allowed_targets);
 
     if (messages_listener_reg_.is_valid()) messages_listener_reg_.Remove();
 
-    messages_listener_reg_ = targeted_query.AddSnapshotListener([room_id, my_client_id, session_start_ms, this](const QuerySnapshot& snapshot, Error error, const std::string& error_msg) {
+    messages_listener_reg_ = targeted_query.AddSnapshotListener([token_id, my_client_id, session_start_ms, this](const QuerySnapshot& snapshot, Error error, const std::string& error_msg) {
         if (error != kErrorOk) {
             SPDLOG_ERROR("Snapshot listener error: {}", error_msg);
             return;
@@ -333,10 +333,10 @@ void SignalingClient::ListenForTargetedMessages(const std::string& room_id, cons
     });
 }
 
-void SignalingClient::SendTargetedMessage(const std::string& room_id, const std::string& my_client_id, 
+void SignalingClient::SendTargetedMessage(const std::string& token_id, const std::string& my_client_id, 
                                           const std::string& target_client_id, const std::string& text_payload) {
-    if (!db_ || room_id.empty() || my_client_id.empty()) return;
-    CollectionReference messages_ref = db_->Collection("rooms").Document(room_id).Collection("messages");
+    if (!db_ || token_id.empty() || my_client_id.empty()) return;
+    CollectionReference messages_ref = db_->Collection("rooms").Document(token_id).Collection("messages");
 
     MapFieldValue msg_map = {
         {"senderId",  FieldValue::String(my_client_id)},
