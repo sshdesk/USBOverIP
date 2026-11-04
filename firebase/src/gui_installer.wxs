@@ -21,7 +21,7 @@
         </StandardDirectory>
         <StandardDirectory Id="DesktopFolder" />
 
-        <!-- 2. Application Files Component (Binary, json, devnode.exe, assets, and shortcuts) -->
+
         <DirectoryRef Id="AppFolder">
             <Component Id="GuiAppBinaryComponent" Guid="cc9a3725-1bc3-4f1e-be8d-4c5bfa02809f">
                 <File Id="GuiUsbipExe" Source="bin\gui_usbip.exe" KeyPath="yes">

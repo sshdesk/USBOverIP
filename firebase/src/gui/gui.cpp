@@ -43,7 +43,7 @@ bool GUI::init() {
         return false;
     }
 
-    window = SDL_CreateWindow("Cross-Platform SDL GUI", 
+    window = SDL_CreateWindow("Stim USB Share", 
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WINDOW_WIDTH, WINDOW_HEIGHT, SDL_WINDOW_SHOWN);
     if (!window) return false;
 

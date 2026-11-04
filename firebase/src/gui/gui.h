@@ -8,7 +8,7 @@
 #include <functional>
 
 struct UIState {
-    std::string inputText = "enteryour@email.com";
+    std::string inputText = "Email_TO_GET_Tocken_ID";
     bool isInputActive = false;
     std::vector<std::string> listItems = {"Select an action to begin."};
     int selectedIndex = -1;
@@ -37,6 +37,8 @@ public:
     void setLogHandler(ButtonHandler handler)          { log_handler_ = handler; }
 
     void setLabelText(const std::string& text) { state.labelText = text; }
+    void setInputText(const std::string& text) { state.inputText = text; }
+
     void setButtonsEnabled(bool enabled) { state.buttonsEnabled = enabled; }
 
     std::string getSelectedItem() const {

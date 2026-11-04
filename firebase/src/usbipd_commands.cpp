@@ -86,20 +86,21 @@ bool UsbIpdCommands::startHostSession(const std::string& room_id, const std::str
     signaling_client->LoadConfigFromDisk(active_room_id, saved_log_level);
 
     std::srand(static_cast<unsigned int>(std::time(nullptr)));
-    global_client_id = "cpp_peer_" + std::to_string(std::rand() % 90000 + 1000);
+    global_client_id = "stim_peer_" + std::to_string(std::rand() % 90000 + 1000);
 
     if (active_room_id.empty()) {
-        active_room_id = signaling_client->GenerateRandomRoomId(20);
-        setHostServer(true);
-        if (g_active_gui) {
-            g_active_gui->setLabelText("Room created for host server. Share this ID with your peer: " + active_room_id);
-        }
-    } else {
-        setHostServer(true);
-        if (g_active_gui) {
-            g_active_gui->setLabelText("Joining room as Host Server: " + active_room_id);
-        }
-    }
+      if (g_active_gui)
+        active_room_id =g_active_gui->getInputText();
+
+    } 
+
+    setHostServer(true);
+    if (g_active_gui) {
+            g_active_gui->setLabelText("Room created: " + active_room_id);
+            g_active_gui->setInputText(active_room_id);
+     }
+
+
 
     signaling_client->SaveConfigToDisk(active_room_id, "info");
     SetupRotatingLogging(isHostServer(), "info");

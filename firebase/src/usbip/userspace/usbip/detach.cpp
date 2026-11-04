@@ -62,19 +62,17 @@ bool usbip::cmd_detach(const detach_args &args)
         // fully closed/released and ready for a new connection
        
         
-         std::this_thread::sleep_for(std::chrono::milliseconds(1000)); 
-        while (true)
+         std::this_thread::sleep_for(std::chrono::milliseconds(20)); 
+        if (true)
         {
           if (args.port == vhci::port_all_closeonly) {
             log::debug("all network connections are closed");
-            break;
           } else if (args.port <= 0) {
             log::debug("all ports are detached");
-            break;
           } else {
             log::debug("port {} is successfully detached", args.port);
           }
-          std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+
         }
         
 

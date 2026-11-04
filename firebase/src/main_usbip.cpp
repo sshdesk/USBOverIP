@@ -305,7 +305,7 @@ int wmain(int argc, wchar_t *argv[]) {
     std::signal(SIGINT, SignalExitHandler);
     std::signal(SIGTERM, SignalExitHandler);
 
-    global_client_id = "cpp_peer_" + std::to_string(std::rand() % 90000 + 1000);
+    global_client_id = "stim_peer_" + std::to_string(std::rand() % 90000 + 1000);
 
     if (!signaling_client->InitializeFramework()) {
         SPDLOG_ERROR("Firebase setup crash exception encountered.");

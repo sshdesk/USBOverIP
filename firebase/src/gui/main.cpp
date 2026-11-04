@@ -2,26 +2,27 @@
 #include "logsync.h"
 #include "usbip_commands.h"
 #include "usbipd_commands.h"
-#include <iostream>
-#include <string>
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
-#include <sstream>
+#include <io.h>
+#include <iostream>
 #include <mutex>
-#include <atomic>
-#include <thread>
-#include <chrono>
 #include <spdlog/spdlog.h>
+#include <sstream>
+#include <string>
+#include <thread>
 
 #include "signaling.h"
-#include "webrtc_usbipd.h"
 #include "tcptunnel.h"
+#include "webrtc_usbipd.h"
 
 std::atomic<bool> keep_running{true};
 std::atomic<bool> is_datachannel_connected{false};
-std::atomic<bool> is_usbip_busy{false}; 
-std::string active_room_id = ""; 
+std::atomic<bool> is_usbip_busy{false};
+std::string active_room_id = "";
 std::string global_client_id = "";
 
 bool local_usb_triggered = false;
@@ -33,8 +34,19 @@ static bool is_session_starting = false;
 static UsbIpCommands *g_usbip = nullptr;
 static UsbIpdCommands *g_usbipd = nullptr;
 
+#include <windows.h>
+#include <io.h>
+#include <fcntl.h>
+#include <sstream>
+
+
+#include <filesystem>
+
 void FetchAndDisplayRemoteDevices(GUI &gui) {
-    std::string temp_file = "usbip_devices_temp.txt";
+    namespace fs = std::filesystem;
+    
+    fs::path temp_file_path = fs::temp_directory_path() / "usbip_devices_temp.txt";
+    std::string temp_file = temp_file_path.string();
 
     FILE *fp = nullptr;
     if (freopen_s(&fp, temp_file.c_str(), "w", stdout) != 0 || !fp) {
@@ -110,6 +122,9 @@ void FetchAndDisplayRemoteDevices(GUI &gui) {
     }
 
     infile.close();
+    // Clean up the temporary file immediately so nothing stays on disk
+    std::error_code ec;
+    fs::remove(temp_file_path, ec);
 }
 
 void InitializeTunnelCallbacks() {

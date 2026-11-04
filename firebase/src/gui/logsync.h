@@ -10,21 +10,45 @@
 #include <spdlog/sinks/rotating_file_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include "gui.h"
+#include <windows.h>
+#include <shlobj.h>
+#include <filesystem>
+
 
 extern GUI *g_active_gui;
 extern std::deque<std::string> g_log_buffer;
 extern std::mutex g_log_mutex;
 
-inline void
-SetupRotatingLogging(bool host_server, const std::string &level_str = "info") {
+
+
+
+inline void SetupRotatingLogging(bool host_server, const std::string &level_str = "info") {
     try {
-        auto max_size = 1048576 * 5; // 5 MB
+        // 1. Determine AppData path safely
+        namespace fs = std::filesystem;
+        fs::path log_dir;
+        
+        char appdata_path[MAX_PATH];
+        if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_APPDATA, NULL, 0, appdata_path))) {
+            log_dir = fs::path(appdata_path) / "USBIP" / "logs";
+        } else {
+            // Fallback to temp directory if AppData is inaccessible
+            log_dir = fs::temp_directory_path() / "USBIP" / "logs";
+        }
+
+        // 2. Ensure the log directory exists
+        if (!fs::exists(log_dir)) {
+            fs::create_directories(log_dir);
+        }
+
+        // 3. Construct absolute path for the log file
+        std::string log_file_name = host_server ? "host_log.txt" : "client_log.txt";
+        fs::path full_log_path = log_dir / log_file_name;
+
+        auto max_size = 1048576 ; // 1 MB
         auto max_files = 3;
         
-        std::string log_file_name =    host_server ? "host_log.txt" : "client_log.txt";
-     
-
-        auto rotating_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(log_file_name, max_size, max_files);
+        auto rotating_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(full_log_path.string(), max_size, max_files);
         auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
         
         std::vector<spdlog::sink_ptr> sinks;
@@ -36,6 +60,8 @@ SetupRotatingLogging(bool host_server, const std::string &level_str = "info") {
         spdlog::set_default_logger(logger);
         spdlog::set_level(spdlog::level::from_str(level_str));
         spdlog::flush_on(spdlog::level::info);
+        
+        spdlog::info("Logging initialized at: {}", full_log_path.string());
     } catch (const spdlog::spdlog_ex& ex) {
         std::printf("Log initialization failed: %s\n", ex.what());
     }
