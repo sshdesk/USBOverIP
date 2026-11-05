@@ -2,10 +2,13 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
     <Package Name="USBIP &amp; Drivers" Language="1033" Version="1.0.0.0" Manufacturer="stim.io" UpgradeCode="7163fc54-0b12-4f90-afed-8f8cfb01690a" InstallerVersion="500" Scope="perMachine">
 
-        <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
-        <MediaTemplate EmbedCab="yes" />
+        <!-- 1. Major Upgrade setup: Automatically uninstalls previous version silently -->
+        <MajorUpgrade 
+            Schedule="afterInstallInitialize"
+            AllowSameVersionUpgrades="yes"
+            DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
 
-        <!-- 1. Directory Structure (Forced to 64-bit Program Files) -->
+        <!-- 2. Directory Structure (Forced to 64-bit Program Files) -->
         <StandardDirectory Id="ProgramFiles64Folder">
             <Directory Id="INSTALLFOLDER" Name="USBIP">
                 <Directory Id="AppFolder" Name="bin" />
@@ -20,7 +23,6 @@
             <Directory Id="ApplicationProgramsFolder" Name="USBIP Suite" />
         </StandardDirectory>
         <StandardDirectory Id="DesktopFolder" />
-
 
         <DirectoryRef Id="AppFolder">
             <Component Id="GuiAppBinaryComponent" Guid="cc9a3725-1bc3-4f1e-be8d-4c5bfa02809f">
@@ -87,7 +89,7 @@
             </Component>
         </DirectoryRef>
 
-        <!-- 5. Feature Definition -->
+        <!-- 4. Feature Definition -->
         <Feature Id="ProductFeature" Title="USBIP Suite" Level="1">
             <ComponentRef Id="GuiAppBinaryComponent" />
             <ComponentRef Id="GuiAssetsComponent" />
@@ -95,7 +97,7 @@
             <ComponentRef Id="ApplicationProgramsFolderComponent" />
         </Feature>
 
-        <!-- 6. Custom Actions (Elevated PowerShell Execution) -->
+        <!-- 5. Custom Actions (Elevated PowerShell Execution) -->
         <CustomAction Id="RunInstallUsbipdGui" 
                       Directory="DriverFilesDir" 
                       ExeCommand="powershell.exe -NoLogo -ExecutionPolicy Bypass -NoProfile -Command &quot;cd '[DriverFilesDir]'; &amp; '[DriverFilesDir]\install_usbip_drivers.ps1'; if (-not $?) { Read-Host 'Installation failed. Press Enter to exit' }&quot;" 
@@ -106,10 +108,10 @@
                       ExeCommand="powershell.exe -NoLogo -ExecutionPolicy Bypass -NoProfile -Command &quot;cd '[DriverFilesDir]'; &amp; '[DriverFilesDir]\uninstall_usbip_drivers.ps1'; if (-not $?) { Read-Host 'Uninstallation failed. Press Enter to exit' }&quot;" 
                       Execute="deferred" Return="ignore" Impersonate="no" />
 
-        <!-- 7. Execution Sequence -->
+        <!-- 6. Execution Sequence -->
         <InstallExecuteSequence>
-            <Custom Action="RunInstallUsbipdGui" After="InstallFiles" Condition="NOT Installed" />
-            <Custom Action="RunUninstallUsbipdGui" Before="RemoveFiles" Condition="Installed AND (REMOVE=&quot;ALL&quot;)" />
+            <Custom Action="RunInstallUsbipdGui" After="InstallFiles" Condition="NOT Installed OR WIX_UPGRADE_DETECTED" />
+            <Custom Action="RunUninstallUsbipdGui" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot; OR UPGRADINGPRODUCTCODE" />
         </InstallExecuteSequence>
     </Package>
 </Wix>

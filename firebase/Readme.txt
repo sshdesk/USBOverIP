@@ -9,7 +9,7 @@ python ../conan-deps/src/conan-cache-generator.py --type windows_release --downl
 python ../conan-deps/src/conan-cache-generator.py --build-project --type windows_release
 
 cmake -B build-cache-windows_release -S . -DCMAKE_BUILD_TYPE=Release
-cmake --build build-cache-windows_release --config Debug --target package_installer
+cmake --build build-cache-windows_debug --config Debug --target package_all_installers
 
 
 for debug 
@@ -40,6 +40,7 @@ wix --version
 
 dotnet wix eula accept wix7
 
+ dotnet wix extension add WixToolset.UI.wixext
 
 
 Tag and push a test version (e.g., v1.0.0-test):

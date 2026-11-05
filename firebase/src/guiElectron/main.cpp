@@ -59,6 +59,18 @@ void GUI::setLabelText(const std::string& text) {
     EmitEvent("STATE", text);
 }
 
+
+
+void GUI::setInputText(const std::string& text) { 
+    EmitEvent("STATE", text); 
+}
+
+std::string GUI::getInputText() const 
+{ 
+    return ""; 
+}
+
+
 void FetchAndDisplayRemoteDevices() {
     std::string temp_file = "usbip_devices_temp.txt";
 
