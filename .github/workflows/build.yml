@@ -11,6 +11,22 @@ jobs:
     runs-on: windows-2022
     steps:
 
+
+      - name: Checkout Source code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+          persist-credentials: true
+          token: ${{ secrets.WHOLE_GITHUB_TOKEN }}
+
+
+      - name: Force pull Git LFS files
+        shell: bash
+        run: |
+          git lfs install
+          git lfs fetch --all
+          git lfs checkout
+
       - name: Python setup
         uses: actions/setup-python@v5
         with:
@@ -25,20 +41,6 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
-
-      # We must turn off the checkout token optimization to allow Git LFS to authenticate correctly
-      - name: Checkout Source code
-        uses: actions/checkout@v4
-        with:
-          lfs: true
-          persist-credentials: true
-          token: ${{ secrets.WHOLE_GITHUB_TOKEN }}
-
-      - name: Force pull Git LFS files
-        shell: bash
-        run: |
-          git lfs install
-          git lfs pull
 
       - name: Install .NET WiX Toolset
         shell: powershell
@@ -72,3 +74,4 @@ jobs:
             firebase/src/bin/USBIPGui.msi
         env:
           GITHUB_TOKEN: ${{ secrets.WHOLE_GITHUB_TOKEN }}
+
