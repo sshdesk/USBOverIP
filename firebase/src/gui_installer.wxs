@@ -39,6 +39,7 @@
                 </File>
                 <File Id="GoogleServicesJsonGui" Source="bin\google-services.json" />
                 <File Id="DevNodeExeGui" Source="bin\devnode.exe" />
+                <File Id="ConfExe" Source="script\config.txt" />
             </Component>
             <Directory Id="AssetsFolder" Name="assets">
                 <Component Id="GuiAssetsComponent" Guid="8f4b2a1c-3e5d-4f7a-9b1c-2d3e4f5a6b7c">
