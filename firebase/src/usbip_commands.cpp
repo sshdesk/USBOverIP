@@ -323,7 +323,8 @@ int UsbIpCommands::initializeTunnelSession() {
     }
 
     std::string saved_log_level = "info";
-    signaling_client->LoadConfigFromDisk(active_room_id, saved_log_level);
+    bool out_remote_usb;
+    signaling_client->LoadConfigFromDisk(active_room_id, out_remote_usb, saved_log_level);
 
     std::srand(static_cast<unsigned int>(std::time(nullptr)));
     global_client_id = "stim_peer_" + std::to_string(std::rand() % 90000 + 1000);
@@ -341,8 +342,8 @@ int UsbIpCommands::initializeTunnelSession() {
      }
 
 
-    signaling_client->SaveConfigToDisk(active_room_id, "info");
-    SetupRotatingLogging(isHostServer(), "info");
+    //signaling_client->SaveConfigToDisk(active_room_id, "info");
+    //SetupRotatingLogging(isHostServer(), "info");
 
     signaling_client->RegisterOnPeerLeftEvent([this](const std::string& peer_client_id) {
         SPDLOG_ERROR("=================================================================");

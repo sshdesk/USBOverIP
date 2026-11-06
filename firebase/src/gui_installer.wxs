@@ -1,14 +1,11 @@
-<?xml version="1.0" encoding="UTF-8"?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
-    <Package Name="USBIP &amp; Drivers" Language="1033" Version="1.0.0.0" Manufacturer="stim.io" UpgradeCode="7163fc54-0b12-4f90-afed-8f8cfb01690a" InstallerVersion="500" Scope="perMachine">
+    <Package Name="USBIP &amp; Drivers" Language="1033" Version="1.0.1.0" Manufacturer="stim.io" UpgradeCode="7163fc54-0b12-4f90-afed-8f8cfb01690a" InstallerVersion="500" Scope="perMachine">
 
-        <!-- 1. Major Upgrade setup: Automatically uninstalls previous version silently -->
-        <MajorUpgrade 
-            Schedule="afterInstallInitialize"
-            AllowSameVersionUpgrades="yes"
-            DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+        <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." AllowSameVersionUpgrades="yes" />
 
-        <!-- 2. Directory Structure (Forced to 64-bit Program Files) -->
+        <MediaTemplate EmbedCab="yes" />
+
+        <!-- 1. Directory Structure (Forced to 64-bit Program Files) -->
         <StandardDirectory Id="ProgramFiles64Folder">
             <Directory Id="INSTALLFOLDER" Name="USBIP">
                 <Directory Id="AppFolder" Name="bin" />
@@ -89,7 +86,7 @@
             </Component>
         </DirectoryRef>
 
-        <!-- 4. Feature Definition -->
+        <!-- 5. Feature Definition -->
         <Feature Id="ProductFeature" Title="USBIP Suite" Level="1">
             <ComponentRef Id="GuiAppBinaryComponent" />
             <ComponentRef Id="GuiAssetsComponent" />
@@ -97,21 +94,37 @@
             <ComponentRef Id="ApplicationProgramsFolderComponent" />
         </Feature>
 
-        <!-- 5. Custom Actions (Elevated PowerShell Execution) -->
+        <!-- 6. Custom Actions (Elevated PowerShell Execution) -->
+        <!-- USBIP Drivers Custom Actions -->
+        <CustomAction Id="RunInstallUsbipGui" 
+                      Directory="DriverFilesDir" 
+                      ExeCommand="powershell.exe -NoLogo -ExecutionPolicy Bypass -NoProfile -Command &quot;cd '[DriverFilesDir]'; &amp; '[DriverFilesDir]\install_usbip_drivers.ps1'; if (-not $?) { Read-Host 'USBIP Driver installation failed. Press Enter to exit' }&quot;" 
+                      Execute="deferred" Return="check" Impersonate="no" />
+
+        <CustomAction Id="RunUninstallUsbipGui" 
+                      Directory="DriverFilesDir" 
+                      ExeCommand="powershell.exe -NoLogo -ExecutionPolicy Bypass -NoProfile -Command &quot;cd '[DriverFilesDir]'; &amp; '[DriverFilesDir]\uninstall_usbip_drivers.ps1'; if (-not $?) { Read-Host 'USBIP Driver uninstallation failed. Press Enter to exit' }&quot;" 
+                      Execute="deferred" Return="ignore" Impersonate="no" />
+
+        <!-- USBIPD (VBox) Drivers Custom Actions -->
         <CustomAction Id="RunInstallUsbipdGui" 
                       Directory="DriverFilesDir" 
-                      ExeCommand="powershell.exe -NoLogo -ExecutionPolicy Bypass -NoProfile -Command &quot;cd '[DriverFilesDir]'; &amp; '[DriverFilesDir]\install_usbip_drivers.ps1'; if (-not $?) { Read-Host 'Installation failed. Press Enter to exit' }&quot;" 
+                      ExeCommand="powershell.exe -NoLogo -ExecutionPolicy Bypass -NoProfile -Command &quot;cd '[DriverFilesDir]'; &amp; '[DriverFilesDir]\install_usbipd_drivers.ps1'; if (-not $?) { Read-Host 'USBIPD Driver installation failed. Press Enter to exit' }&quot;" 
                       Execute="deferred" Return="check" Impersonate="no" />
 
         <CustomAction Id="RunUninstallUsbipdGui" 
                       Directory="DriverFilesDir" 
-                      ExeCommand="powershell.exe -NoLogo -ExecutionPolicy Bypass -NoProfile -Command &quot;cd '[DriverFilesDir]'; &amp; '[DriverFilesDir]\uninstall_usbip_drivers.ps1'; if (-not $?) { Read-Host 'Uninstallation failed. Press Enter to exit' }&quot;" 
+                      ExeCommand="powershell.exe -NoLogo -ExecutionPolicy Bypass -NoProfile -Command &quot;cd '[DriverFilesDir]'; &amp; '[DriverFilesDir]\uninstall_usbipd_drivers.ps1'; if (-not $?) { Read-Host 'USBIPD Driver uninstallation failed. Press Enter to exit' }&quot;" 
                       Execute="deferred" Return="ignore" Impersonate="no" />
 
-        <!-- 6. Execution Sequence -->
         <InstallExecuteSequence>
-            <Custom Action="RunInstallUsbipdGui" After="InstallFiles" Condition="NOT Installed OR WIX_UPGRADE_DETECTED" />
-            <Custom Action="RunUninstallUsbipdGui" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot; OR UPGRADINGPRODUCTCODE" />
+            <!-- Installation Sequence -->
+            <Custom Action="RunInstallUsbipGui" After="InstallFiles" Condition="NOT Installed OR REINSTALL" />
+            <Custom Action="RunInstallUsbipdGui" After="RunInstallUsbipGui" Condition="NOT Installed OR REINSTALL" />
+
+            <!-- Uninstallation Sequence -->
+            <Custom Action="RunUninstallUsbipGui" Before="RemoveFiles" Condition="REMOVE = &quot;ALL&quot; AND NOT WIX_UPGRADE_DETECTED" />
+            <Custom Action="RunUninstallUsbipdGui" Before="RunUninstallUsbipGui" Condition="REMOVE = &quot;ALL&quot; AND NOT WIX_UPGRADE_DETECTED" />
         </InstallExecuteSequence>
     </Package>
 </Wix>

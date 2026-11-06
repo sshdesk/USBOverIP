@@ -40,8 +40,8 @@ public:
 
     // Config and Identity
     std::string GenerateRandomRoomId(size_t length = 20);
-    bool SaveConfigToDisk(const std::string& token_id, const std::string& log_level = "info", const std::string& filename = "config.txt");
-    void LoadConfigFromDisk(std::string& out_room_id, std::string& out_log_level, const std::string& filename = "config.txt");
+    bool SaveConfigToDisk(const std::string& token_id, bool remote_usb, const std::string& log_level = "info", const std::string& filename = "config.txt");
+    void LoadConfigFromDisk(std::string& out_room_id, bool& out_remote_usb, std::string& out_log_level, const std::string& filename = "config.txt");
 
     // Room Lifecycle & Role Assignment
     void JoinRoom(const std::string& token_id, const std::string& my_client_id, RoleAssignedCallback on_role_assigned);

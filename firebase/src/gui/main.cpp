@@ -38,9 +38,46 @@ static UsbIpdCommands *g_usbipd = nullptr;
 #include <io.h>
 #include <fcntl.h>
 #include <sstream>
-
+#include <shellapi.h>
 
 #include <filesystem>
+
+bool IsRunningAsAdmin() {
+    BOOL fIsRunAsAdmin = FALSE;
+    PSID pAdministratorsGroup = NULL;
+    SID_IDENTIFIER_AUTHORITY NtAuthority = SECURITY_NT_AUTHORITY;
+    
+    if (AllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID,
+                                 DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0,
+                                 &pAdministratorsGroup)) {
+        CheckTokenMembership(NULL, pAdministratorsGroup, &fIsRunAsAdmin);
+        FreeSid(pAdministratorsGroup);
+    }
+    return fIsRunAsAdmin == TRUE;
+}
+
+// Helper to elevate and restart the executable as administrator
+void RelaunchAsAdmin(int argc, char* argv[]) {
+    char szPath[MAX_PATH];
+    if (GetModuleFileNameA(NULL, szPath, ARRAYSIZE(szPath))) {
+        std::string args = "";
+        for (int i = 1; i < argc; ++i) {
+            args += " \"";
+            args += argv[i];
+            args += "\"";
+        }
+
+        SHELLEXECUTEINFOA sei = { sizeof(sei) };
+        sei.lpVerb = "runas";
+        sei.lpFile = szPath;
+        sei.lpParameters = args.empty() ? NULL : args.c_str();
+        sei.nShow = SW_NORMAL;
+
+        if (ShellExecuteExA(&sei)) {
+            exit(0); // Exit current non-elevated instance
+        }
+    }
+}
 
 void FetchAndDisplayRemoteDevices(GUI &gui) {
     namespace fs = std::filesystem;
@@ -158,9 +195,20 @@ void InitializeTunnelCallbacks() {
     g_usbip->getTunnelManager()->RegisterOnTcpClientDisconnectedCallback([]() {
         SPDLOG_WARN("[Callback] TCP client disconnected from the tunnel.");
     });
+
+    // Register low-frequency cumulative total received bytes callback from WebRTC data channel
+    g_usbip->getTunnelManager()->RegisterOnDataChannelTotalReceivedCallback([](uint64_t total_bytes) {
+        SPDLOG_INFO("[Callback] Cumulative data received from WebRTC data channel: {} bytes", total_bytes);
+        g_active_gui->setLabelText( "Cumulative data received from WebRTC data channel: " +      std::to_string(total_bytes) + " bytes");
+    });
 }
 
 int main(int argc, char* argv[]) {
+    if (!IsRunningAsAdmin()) {
+        RelaunchAsAdmin(argc, argv);
+        return -1; // Exit if user declines the UAC prompt
+    }
+
     rtc::LogMessage::LogToDebug(rtc::LoggingSeverity::LS_ERROR);
 
     GUI gui;
@@ -195,7 +243,8 @@ int main(int argc, char* argv[]) {
             target_gui.setLabelText("Failed to initialize host sharing session");
             return;
         }
-        target_gui.setLabelText("Hosting local USB devices on room: " + active_room_id);
+        target_gui.setLocalUSBEnabled(false);
+        target_gui.setLabelText("Hosting local USB devices for token: " + active_room_id);
     });
 
     // 2. Remote USB
@@ -215,9 +264,6 @@ int main(int argc, char* argv[]) {
         target_gui.clearListItems();
         target_gui.addListItem("Initializing WebRTC tunnel to remote host...");
 
-        //static std::once_flag callbacks_flag;
-        //std::call_once(callbacks_flag, []() {  });
-
         InitializeTunnelCallbacks();
 
         int ret = g_usbip->initializeTunnelSession();
@@ -225,6 +271,7 @@ int main(int argc, char* argv[]) {
             target_gui.setLabelText("Failed to establish client tunnel");
             return;
         }
+         target_gui.setRemoteUSBEnabled(false);
     });
 
     // 3. Attach (Non-blocking background thread with UI locking)
@@ -235,7 +282,13 @@ int main(int argc, char* argv[]) {
         }
 
         std::string selected = target_gui.getSelectedItem();
-        if (selected.empty() || selected.find("---") != std::string::npos) return;
+        if (selected.empty() || selected.find("---") != std::string::npos) {
+               SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Select an Item",
+                                   "Please select an item from the options below.",
+                                   NULL
+          );
+          return;
+        }
 
         size_t start = selected.find('[');
         size_t end = selected.find(']');
@@ -243,7 +296,7 @@ int main(int argc, char* argv[]) {
             std::string busid = selected.substr(start + 1, end - start - 1);
             
             is_usbip_busy = true;
-            target_gui.setButtonsEnabled(false); // Dim and disable buttons
+             target_gui.setRemoteAttachEnabled(false); 
             target_gui.setLabelText("Attaching device " + busid + "...");
 
             std::thread([busid, &target_gui]() {
@@ -252,7 +305,6 @@ int main(int argc, char* argv[]) {
                     attach_triggered = true;
                 }
                 is_usbip_busy = false;
-                target_gui.setButtonsEnabled(true); // Re-enable buttons and restore colors
             }).detach();
         }
     });
@@ -265,7 +317,7 @@ int main(int argc, char* argv[]) {
         }
 
         is_usbip_busy = true;
-        target_gui.setButtonsEnabled(false); // Dim and disable buttons
+        target_gui.setRemoteDetachEnabled(false);
         target_gui.setLabelText("Detaching all remote USB devices...");
 
        /* if (remote_usb_triggered && g_usbip) {
@@ -281,7 +333,8 @@ int main(int argc, char* argv[]) {
                 g_usbip->executeCommand({"detach", "-a"});
             }
             is_usbip_busy = false;
-            target_gui.setButtonsEnabled(true); // Re-enable buttons and restore colors
+             target_gui.setRemoteAttachEnabled(true);
+             target_gui.setRemoteDetachEnabled(true);
         }).detach();
     });
 

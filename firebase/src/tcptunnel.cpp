@@ -28,9 +28,14 @@ inline void EnableTcpKeepAlive(SOCKET sock) {
     setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, reinterpret_cast<const char*>(&opt), sizeof(opt));
 }
 
-WebRtcToTcpTunnel::WebRtcToTcpTunnel(std::atomic<SOCKET>& client_socket, rtc::scoped_refptr<webrtc::DataChannelInterface> data_channel)
+WebRtcToTcpTunnel::WebRtcToTcpTunnel(std::atomic<SOCKET>& client_socket, 
+                                     rtc::scoped_refptr<webrtc::DataChannelInterface> data_channel,
+                                     DataChannelTotalReceivedCallback callback)
   : client_socket_(client_socket)
   , _dataChannel(data_channel)
+  , total_received_callback_(std::move(callback))
+  , total_bytes_received_(0)
+  , last_callback_time_(std::chrono::steady_clock::now())
 {
 }
 
@@ -54,12 +59,7 @@ void WebRtcToTcpTunnel::OnStateChange()
    if (state == webrtc::DataChannelInterface::kOpen)
    {
      //Test code
-    //std::vector<uint8_t> raw_binary { 1, 2, 3 };
-    //rtc::CopyOnWriteBuffer buffer(raw_binary.data(), raw_binary.size());
-    //webrtc::DataBuffer data_buffer(buffer, true);
-    //_dataChannel->Send(data_buffer);
-    }	
- 
+    } 
   }
 }
 
@@ -71,7 +71,21 @@ void WebRtcToTcpTunnel::OnMessage(const webrtc::DataBuffer& buffer)
     return;
   }
 
-  SPDLOG_INFO("TCP Tunnel received {} bytes from data channel", (int)buffer.data.size());
+  //SPDLOG_INFO("TCP Tunnel received {} bytes from data channel", (int)buffer.data.size());
+
+  // Accumulate total bytes and trigger throttled low-frequency callback (e.g., every 1000ms)
+  total_bytes_received_ += buffer.data.size();
+  if (total_received_callback_)
+  {
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_callback_time_).count();
+    if (elapsed >= 1000)
+    {
+      total_received_callback_(total_bytes_received_);
+      last_callback_time_ = now;
+    }
+  }
+
   SOCKET socket_snap = client_socket_.load();
   if (socket_snap != INVALID_SOCKET)
   {
@@ -103,6 +117,7 @@ WebRtcTcpTunnelManager::WebRtcTcpTunnelManager(int port)
   , tcp_server_stopped_callback_(nullptr)
   , tcp_client_connected_callback_(nullptr)
   , tcp_client_disconnected_callback_(nullptr)
+  , data_channel_total_received_callback_(nullptr)
 {
   int tcpport = 3240;
   if (tcpport > 1024)
@@ -134,6 +149,11 @@ void WebRtcTcpTunnelManager::RegisterOnTcpClientConnectedCallback(TcpClientConne
 void WebRtcTcpTunnelManager::RegisterOnTcpClientDisconnectedCallback(TcpClientDisconnectedCallback callback)
 {
   tcp_client_disconnected_callback_ = std::move(callback);
+}
+
+void WebRtcTcpTunnelManager::RegisterOnDataChannelTotalReceivedCallback(DataChannelTotalReceivedCallback callback)
+{
+  data_channel_total_received_callback_ = std::move(callback);
 }
 
 bool WebRtcTcpTunnelManager::Start()
@@ -211,8 +231,7 @@ void WebRtcTcpTunnelManager::Stop()
   if (!running_.exchange(false))
     return;
 
-    
- tunnel_observer_.reset();
+  tunnel_observer_.reset();
   
   SOCKET listen_snap = listen_socket_.exchange(INVALID_SOCKET);
   SOCKET client_snap = client_socket_.exchange(INVALID_SOCKET);
@@ -243,8 +262,6 @@ void WebRtcTcpTunnelManager::Stop()
   {
     tcp_server_stopped_callback_();
   }
-  
-  
 }
 
 void WebRtcTcpTunnelManager::RunServerLoop()
@@ -282,7 +299,7 @@ void WebRtcTcpTunnelManager::RunServerLoop()
 
 void WebRtcTcpTunnelManager::HandleDataChannel(rtc::scoped_refptr<webrtc::DataChannelInterface> data_channel, rtc::Thread* webrtc_thread)
 {
-  tunnel_observer_ = std::make_unique<WebRtcToTcpTunnel>(client_socket_, data_channel);
+  tunnel_observer_ = std::make_unique<WebRtcToTcpTunnel>(client_socket_, data_channel, data_channel_total_received_callback_);
   data_channel->RegisterObserver(tunnel_observer_.get());
 
   if (proxy_thread_.joinable())
@@ -322,7 +339,7 @@ void WebRtcTcpTunnelManager::RunTcpToWebRtcLoop(rtc::scoped_refptr<webrtc::DataC
 
     if (bytes_received > 0)
     {
-      SPDLOG_INFO("TCP Tunnel received {} bytes from local client.", bytes_received);
+      //SPDLOG_INFO("TCP Tunnel received {} bytes from local client.", bytes_received);
       std::vector<uint8_t> raw_binary(recvbuf.begin(), recvbuf.begin() + bytes_received);
 
       webrtc_thread->PostTask(

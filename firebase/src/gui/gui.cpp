@@ -1,4 +1,5 @@
 #include "gui.h"
+#include "signaling.h"
 #include <iostream>
 #include <algorithm>
 
@@ -19,17 +20,36 @@ static void renderText(SDL_Renderer* renderer, TTF_Font* font, const std::string
 
 GUI::GUI() 
     : window(nullptr), renderer(nullptr), font(nullptr), isDraggingScrollbar(false) {
-    textBoxRect          = { 40, 50, 180, 36 };
-    localUsbBtnRect      = { 230, 50, 110, 36 };
-    remoteUsbBtnRect     = { 350, 50, 120, 36 };
-    remoteAttachBtnRect  = { 480, 50, 130, 36 };
-    remoteDetachBtnRect  = { 620, 50, 130, 36 };
-    logBtnRect           = { 760, 50, 100, 36 };
-    listViewRect         = { 40, 105, 820, 470 };
+    checkboxRect         = { 40, 40, 20, 20 };
+    textBoxRect          = { 40, 75, 180, 36 };
+    localUsbBtnRect      = { 230, 75, 110, 36 };
+    remoteUsbBtnRect     = { 230, 75, 120, 36 };
+    remoteAttachBtnRect  = { 360, 75, 130, 36 };
+    remoteDetachBtnRect  = { 500, 75, 130, 36 };
+    logBtnRect           = { 760, 75, 100, 36 };
+    listViewRect         = { 40, 130, 820, 445 };
     labelPos             = { 40, 585, 0, 0 };
+
+    // Load configuration from disk using SignalingClient
+    std::string loaded_token_id;
+    bool loaded_remote_usb = false;
+    std::string loaded_log_level;
+    SignClient_LoadConfigHelper_placeholder: // or use SignalingClient directly
+    {
+        SignalingClient client;
+        client.LoadConfigFromDisk(loaded_token_id, loaded_remote_usb, loaded_log_level);
+    }
+    state.inputText = loaded_token_id;
+    state.forRemoteUsb = loaded_remote_usb;
 }
 
 GUI::~GUI() {
+    // Save configuration to disk using SignalingClient upon exit
+    {
+        SignalingClient client;
+        client.SaveConfigToDisk(state.inputText, state.forRemoteUsb);
+    }
+
     if (font) TTF_CloseFont(font);
     TTF_Quit();
     if (renderer) SDL_DestroyRenderer(renderer);
@@ -111,6 +131,13 @@ void GUI::handleEvents(bool& running) {
                 state.scrollY = std::clamp(state.scrollY, 0, maxScrollY);
             }
             else {
+                // Checkbox click detection (including label area for convenience)
+                SDL_Rect fullCheckboxArea = { checkboxRect.x, checkboxRect.y, 115, checkboxRect.h };
+                if (mx >= fullCheckboxArea.x && mx <= fullCheckboxArea.x + fullCheckboxArea.w &&
+                    my >= fullCheckboxArea.y && my <= fullCheckboxArea.y + fullCheckboxArea.h) {
+                    state.forRemoteUsb = !state.forRemoteUsb;
+                }
+
                 if (mx >= textBoxRect.x && mx <= textBoxRect.x + textBoxRect.w &&
                     my >= textBoxRect.y && my <= textBoxRect.y + textBoxRect.h) {
                     state.isInputActive = true;
@@ -120,9 +147,10 @@ void GUI::handleEvents(bool& running) {
                     SDL_StopTextInput();
                 }
 
-                // Only allow button clicks if buttons are currently enabled
-                if (state.buttonsEnabled) {
-                    if (mx >= localUsbBtnRect.x && mx <= localUsbBtnRect.x + localUsbBtnRect.w &&
+                if (!state.forRemoteUsb) {
+                    // LocalUSB branch
+                    if (state.localUsbEnabled &&
+                        mx >= localUsbBtnRect.x && mx <= localUsbBtnRect.x + localUsbBtnRect.w &&
                         my >= localUsbBtnRect.y && my <= localUsbBtnRect.y + localUsbBtnRect.h) {
                         state.pressedButton = 1;
                         state.listItems.clear();
@@ -131,33 +159,40 @@ void GUI::handleEvents(bool& running) {
                             local_usb_handler_(*this);
                         }    
                     }
-                    else if (mx >= remoteUsbBtnRect.x && mx <= remoteUsbBtnRect.x + remoteUsbBtnRect.w &&
-                             my >= remoteUsbBtnRect.y && my <= remoteUsbBtnRect.y + remoteUsbBtnRect.h) {
+                } else {
+                    // RemoteUSB branch
+                    if (state.remoteUsbEnabled &&
+                        mx >= remoteUsbBtnRect.x && mx <= remoteUsbBtnRect.x + remoteUsbBtnRect.w &&
+                        my >= remoteUsbBtnRect.y && my <= remoteUsbBtnRect.y + remoteUsbBtnRect.h) {
                         state.pressedButton = 2;
                         if (remote_usb_handler_) {
                             remote_usb_handler_(*this);
                         }
                     }
-                    else if (mx >= remoteAttachBtnRect.x && mx <= remoteAttachBtnRect.x + remoteAttachBtnRect.w &&
+                    else if (state.remoteAttachEnabled &&
+                             mx >= remoteAttachBtnRect.x && mx <= remoteAttachBtnRect.x + remoteAttachBtnRect.w &&
                              my >= remoteAttachBtnRect.y && my <= remoteAttachBtnRect.y + remoteAttachBtnRect.h) {
                         state.pressedButton = 3;
                         if (remote_attach_handler_) {
                             remote_attach_handler_(*this);
                         }
                     }
-                    else if (mx >= remoteDetachBtnRect.x && mx <= remoteDetachBtnRect.x + remoteDetachBtnRect.w &&
+                    else if (state.remoteDetachEnabled &&
+                             mx >= remoteDetachBtnRect.x && mx <= remoteDetachBtnRect.x + remoteDetachBtnRect.w &&
                              my >= remoteDetachBtnRect.y && my <= remoteDetachBtnRect.y + remoteDetachBtnRect.h) {
                         state.pressedButton = 4;
                         if (remote_detach_handler_) {
                             remote_detach_handler_(*this);
                         }
                     }
-                    else if (mx >= logBtnRect.x && mx <= logBtnRect.x + logBtnRect.w &&
-                             my >= logBtnRect.y && my <= logBtnRect.y + logBtnRect.h) {
-                        state.pressedButton = 5;
-                        if (log_handler_) {
-                            log_handler_(*this);
-                        }
+                }
+
+                // Log button is always active
+                if (mx >= logBtnRect.x && mx <= logBtnRect.x + logBtnRect.w &&
+                    my >= logBtnRect.y && my <= logBtnRect.y + logBtnRect.h) {
+                    state.pressedButton = 5;
+                    if (log_handler_) {
+                        log_handler_(*this);
                     }
                 }
 
@@ -243,14 +278,24 @@ void GUI::render() {
     SDL_Color highlight   = { 100, 149, 237, 255 };
     SDL_Color green       = { 152, 195, 121, 255 };
 
-    // TextBox
+    // Checkbox FOR_REMOTE_USB (Top Row)
+    SDL_SetRenderDrawColor(renderer, 240, 240, 240, 255);
+    SDL_RenderFillRect(renderer, &checkboxRect);
+    if (state.forRemoteUsb) {
+        SDL_SetRenderDrawColor(renderer, 70, 130, 180, 255);
+        SDL_Rect checkMark = { checkboxRect.x + 4, checkboxRect.y + 4, checkboxRect.w - 8, checkboxRect.h - 8 };
+        SDL_RenderFillRect(renderer, &checkMark);
+    }
+    if (font) renderText(renderer, font, "For remote USB", checkboxRect.x + 28, checkboxRect.y + 1, white);
+
+    // TextBox (Next Row)
     SDL_SetRenderDrawColor(renderer, state.isInputActive ? 255 : 240, 240, 240, 255);
     SDL_RenderFillRect(renderer, &textBoxRect);
     if (font) renderText(renderer, font, state.inputText, textBoxRect.x + 8, textBoxRect.y + 8, black);
 
-    // Helper lambda for button coloring depending on enabled state
-    auto getButtonColor = [&](SDL_Color baseColor, int btnID) {
-        if (!state.buttonsEnabled) {
+    // Helper lambda for button coloring depending on individual enabled states
+    auto getButtonColor = [&](SDL_Color baseColor, int btnID, bool isEnabled) {
+        if (!isEnabled) {
             return SDL_Color{ 90, 95, 105, 255 }; // Disabled Gray
         }
         bool isPressed = (state.pressedButton == btnID);
@@ -262,59 +307,60 @@ void GUI::render() {
         };
     };
 
-    // 1. LocalUSB
-    {
+    if (!state.forRemoteUsb) {
+        // Show LocalUSB
         bool isPressed = (state.pressedButton == 1);
         SDL_Rect rect = localUsbBtnRect;
-        if (isPressed && state.buttonsEnabled) { rect.x += 2; rect.y += 2; }
-        SDL_Color col = getButtonColor(localColor, 1);
+        if (isPressed && state.localUsbEnabled) { rect.x += 2; rect.y += 2; }
+        SDL_Color col = getButtonColor(localColor, 1, state.localUsbEnabled);
         SDL_SetRenderDrawColor(renderer, col.r, col.g, col.b, 255);
         SDL_RenderFillRect(renderer, &rect);
-        if (font) renderText(renderer, font, "LocalUSB", rect.x + 20, rect.y + 8, state.buttonsEnabled ? white : SDL_Color{160, 160, 160, 255});
+        if (font) renderText(renderer, font, "Connect", rect.x + 20, rect.y + 8, state.localUsbEnabled ? white : SDL_Color{160, 160, 160, 255});
+    } else {
+        // Show RemoteUSB, RemoteAttach, RemoteDetach
+        // 2. RemoteUSB
+        {
+            bool isPressed = (state.pressedButton == 2);
+            SDL_Rect rect = remoteUsbBtnRect;
+            if (isPressed && state.remoteUsbEnabled) { rect.x += 2; rect.y += 2; }
+            SDL_Color col = getButtonColor(remoteColor, 2, state.remoteUsbEnabled);
+            SDL_SetRenderDrawColor(renderer, col.r, col.g, col.b, 255);
+            SDL_RenderFillRect(renderer, &rect);
+            if (font) renderText(renderer, font, "Connect", rect.x + 18, rect.y + 8, state.remoteUsbEnabled ? white : SDL_Color{160, 160, 160, 255});
+        }
+
+        // 3. RemoteAttach
+        {
+            bool isPressed = (state.pressedButton == 3);
+            SDL_Rect rect = remoteAttachBtnRect;
+            if (isPressed && state.remoteAttachEnabled) { rect.x += 2; rect.y += 2; }
+            SDL_Color col = getButtonColor(remoteColor, 3, state.remoteAttachEnabled);
+            SDL_SetRenderDrawColor(renderer, col.r, col.g, col.b, 255);
+            SDL_RenderFillRect(renderer, &rect);
+            if (font) renderText(renderer, font, "RemoteAttach", rect.x + 14, rect.y + 8, state.remoteAttachEnabled ? white : SDL_Color{160, 160, 160, 255});
+        }
+
+        // 4. RemoteDetach
+        {
+            bool isPressed = (state.pressedButton == 4);
+            SDL_Rect rect = remoteDetachBtnRect;
+            if (isPressed && state.remoteDetachEnabled) { rect.x += 2; rect.y += 2; }
+            SDL_Color col = getButtonColor(remoteColor, 4, state.remoteDetachEnabled);
+            SDL_SetRenderDrawColor(renderer, col.r, col.g, col.b, 255);
+            SDL_RenderFillRect(renderer, &rect);
+            if (font) renderText(renderer, font, "RemoteDetach", rect.x + 14, rect.y + 8, state.remoteDetachEnabled ? white : SDL_Color{160, 160, 160, 255});
+        }
     }
 
-    // 2. RemoteUSB
-    {
-        bool isPressed = (state.pressedButton == 2);
-        SDL_Rect rect = remoteUsbBtnRect;
-        if (isPressed && state.buttonsEnabled) { rect.x += 2; rect.y += 2; }
-        SDL_Color col = getButtonColor(remoteColor, 2);
-        SDL_SetRenderDrawColor(renderer, col.r, col.g, col.b, 255);
-        SDL_RenderFillRect(renderer, &rect);
-        if (font) renderText(renderer, font, "RemoteUSB", rect.x + 18, rect.y + 8, state.buttonsEnabled ? white : SDL_Color{160, 160, 160, 255});
-    }
-
-    // 3. RemoteAttach
-    {
-        bool isPressed = (state.pressedButton == 3);
-        SDL_Rect rect = remoteAttachBtnRect;
-        if (isPressed && state.buttonsEnabled) { rect.x += 2; rect.y += 2; }
-        SDL_Color col = getButtonColor(remoteColor, 3);
-        SDL_SetRenderDrawColor(renderer, col.r, col.g, col.b, 255);
-        SDL_RenderFillRect(renderer, &rect);
-        if (font) renderText(renderer, font, "RemoteAttach", rect.x + 14, rect.y + 8, state.buttonsEnabled ? white : SDL_Color{160, 160, 160, 255});
-    }
-
-    // 4. RemoteDetach
-    {
-        bool isPressed = (state.pressedButton == 4);
-        SDL_Rect rect = remoteDetachBtnRect;
-        if (isPressed && state.buttonsEnabled) { rect.x += 2; rect.y += 2; }
-        SDL_Color col = getButtonColor(remoteColor, 4);
-        SDL_SetRenderDrawColor(renderer, col.r, col.g, col.b, 255);
-        SDL_RenderFillRect(renderer, &rect);
-        if (font) renderText(renderer, font, "RemoteDetach", rect.x + 14, rect.y + 8, state.buttonsEnabled ? white : SDL_Color{160, 160, 160, 255});
-    }
-
-    // 5. Log
+    // 5. Log (Always enabled)
     {
         bool isPressed = (state.pressedButton == 5);
         SDL_Rect rect = logBtnRect;
-        if (isPressed && state.buttonsEnabled) { rect.x += 2; rect.y += 2; }
-        SDL_Color col = getButtonColor(logColor, 5);
+        if (isPressed) { rect.x += 2; rect.y += 2; }
+        SDL_Color col = getButtonColor(logColor, 5, true);
         SDL_SetRenderDrawColor(renderer, col.r, col.g, col.b, 255);
         SDL_RenderFillRect(renderer, &rect);
-        if (font) renderText(renderer, font, "Log", rect.x + 36, rect.y + 8, state.buttonsEnabled ? white : SDL_Color{160, 160, 160, 255});
+        if (font) renderText(renderer, font, "Log", rect.x + 36, rect.y + 8, white);
     }
 
     // ListView Panel

@@ -10,12 +10,19 @@
 struct UIState {
     std::string inputText = "Email_TO_GET_Tocken_ID";
     bool isInputActive = false;
-    std::vector<std::string> listItems = {"Select an action to begin."};
+    std::vector<std::string> listItems = {"Click Connect."};
     int selectedIndex = -1;
-    std::string labelText = "No item selected";
+    std::string labelText = "Click Connect";
     int scrollY = 0;
     int pressedButton = 0; // 0: None, 1: LocalUSB, 2: RemoteUSB, 3: RemoteAttach, 4: RemoteDetach, 5: Log
-    bool buttonsEnabled = true; // Tracks whether buttons accept input and render as enabled
+    bool forRemoteUsb = false;  // Checkbox state for FOR_REMOTE_USB
+
+    // Individual button enabled states
+    bool localUsbEnabled = true;
+    bool remoteUsbEnabled = true;
+    bool remoteAttachEnabled = true;
+    bool remoteDetachEnabled = true;
+    bool logEnabled = true; // Log button always remains enabled by default
 };
 
 class GUI {
@@ -39,7 +46,14 @@ public:
     void setLabelText(const std::string& text) { state.labelText = text; }
     void setInputText(const std::string& text) { state.inputText = text; }
 
-    void setButtonsEnabled(bool enabled) { state.buttonsEnabled = enabled; }
+    // Individual button state setters
+    void setLocalUSBEnabled(bool enabled)     { state.localUsbEnabled = enabled; }
+    void setRemoteUSBEnabled(bool enabled)    { state.remoteUsbEnabled = enabled; }
+    void setRemoteAttachEnabled(bool enabled) { state.remoteAttachEnabled = enabled; }
+    void setRemoteDetachEnabled(bool enabled) { state.remoteDetachEnabled = enabled; }
+
+    void setForRemoteUsb(bool enabled) { state.forRemoteUsb = enabled; }
+    bool isForRemoteUsb() const { return state.forRemoteUsb; }
 
     std::string getSelectedItem() const {
         if (state.selectedIndex >= 0 && state.selectedIndex < static_cast<int>(state.listItems.size())) {
@@ -60,6 +74,7 @@ private:
     UIState state;
     bool isDraggingScrollbar;
 
+    SDL_Rect checkboxRect;
     SDL_Rect textBoxRect;
     SDL_Rect localUsbBtnRect;
     SDL_Rect remoteUsbBtnRect;

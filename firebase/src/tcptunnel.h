@@ -7,6 +7,7 @@
 #include <thread>
 #include <vector>
 #include <functional>
+#include <chrono>
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <winsock2.h>
@@ -38,7 +39,11 @@ const int SOCKET_ERROR = -1;
 class WebRtcToTcpTunnel : public webrtc::DataChannelObserver
 {
 public:
-  WebRtcToTcpTunnel(std::atomic<SOCKET>& client_socket, rtc::scoped_refptr<webrtc::DataChannelInterface> data_channel);
+  using DataChannelTotalReceivedCallback = std::function<void(uint64_t total_bytes)>;
+
+  WebRtcToTcpTunnel(std::atomic<SOCKET>& client_socket, 
+                    rtc::scoped_refptr<webrtc::DataChannelInterface> data_channel,
+                    DataChannelTotalReceivedCallback callback);
   
   virtual ~WebRtcToTcpTunnel() {
    _dataChannel = nullptr;
@@ -50,6 +55,10 @@ public:
 private:
   std::atomic<SOCKET>& client_socket_;
   rtc::scoped_refptr<webrtc::DataChannelInterface> _dataChannel;
+  DataChannelTotalReceivedCallback total_received_callback_;
+  
+  uint64_t total_bytes_received_;
+  std::chrono::steady_clock::time_point last_callback_time_;
 };
 
 class WebRtcTcpTunnelManager
@@ -59,6 +68,7 @@ public:
   using TcpServerStoppedCallback = std::function<void()>;
   using TcpClientConnectedCallback = std::function<void()>;
   using TcpClientDisconnectedCallback = std::function<void()>;
+  using DataChannelTotalReceivedCallback = WebRtcToTcpTunnel::DataChannelTotalReceivedCallback;
 
   WebRtcTcpTunnelManager(int port);
   ~WebRtcTcpTunnelManager();
@@ -71,6 +81,7 @@ public:
   void RegisterOnTcpServerStoppedCallback(TcpServerStoppedCallback callback);
   void RegisterOnTcpClientConnectedCallback(TcpClientConnectedCallback callback);
   void RegisterOnTcpClientDisconnectedCallback(TcpClientDisconnectedCallback callback);
+  void RegisterOnDataChannelTotalReceivedCallback(DataChannelTotalReceivedCallback callback);
 
 private:
   void RunServerLoop();
@@ -89,6 +100,7 @@ private:
   TcpServerStoppedCallback tcp_server_stopped_callback_;
   TcpClientConnectedCallback tcp_client_connected_callback_;
   TcpClientDisconnectedCallback tcp_client_disconnected_callback_;
+  DataChannelTotalReceivedCallback data_channel_total_received_callback_;
 };
 
 #endif // TCPTUNNEL_H

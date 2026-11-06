@@ -97,20 +97,22 @@ std::string SignalingClient::GenerateRandomRoomId(size_t length) {
     return random_id;
 }
 
-bool SignalingClient::SaveConfigToDisk(const std::string& token_id, const std::string& log_level, const std::string& filename) {
+bool SignalingClient::SaveConfigToDisk(const std::string& token_id, bool remote_usb, const std::string& log_level, const std::string& filename) {
     std::ofstream configFile(filename);
     if (!configFile.is_open()) {
         SPDLOG_WARN("Could not open {} for writing.", filename);
         return false;
     }
     configFile << "TOKEN_ID=" << token_id << "\n";
+    configFile << "REMOTE_USB=" << (remote_usb ? "true" : "false") << "\n";
     configFile << "LOG_LEVEL=" << log_level << "\n";
     return true;
 }
 
-void SignalingClient::LoadConfigFromDisk(std::string& out_room_id, std::string& out_log_level, const std::string& filename) {
+void SignalingClient::LoadConfigFromDisk(std::string& out_room_id, bool& out_remote_usb, std::string& out_log_level, const std::string& filename) {
     std::ifstream configFile(filename);
-    out_room_id.clear();
+    out_room_id = "Email_TO_GET_Tocken_ID";
+    out_remote_usb = false;
     out_log_level = "info";
 
     if (!configFile.is_open()) return;
@@ -123,6 +125,11 @@ void SignalingClient::LoadConfigFromDisk(std::string& out_room_id, std::string& 
             std::string value;
             if (std::getline(is_line, value)) {
                 if (key == "TOKEN_ID") out_room_id = value;
+                else if (key == "REMOTE_USB") {
+                    std::string lower_val = value;
+                    std::transform(lower_val.begin(), lower_val.end(), lower_val.begin(), ::tolower);
+                    out_remote_usb = (lower_val == "true" || lower_val == "1" || lower_val == "yes");
+                }
                 else if (key == "LOG_LEVEL") out_log_level = value;
             }
         }
