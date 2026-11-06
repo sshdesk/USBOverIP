@@ -6,6 +6,14 @@ Set-Location -Path (Split-Path -Path (Get-Variable -Name MyInvocation).Value.MyC
 
 Write-Host "--- Starting usbip-win2 Driver Provisioning ---" -ForegroundColor Cyan
 
+# 0. Clean up any existing installation first
+Write-Host "[0/5] Running uninstallation script to clean previous installation..." -ForegroundColor Cyan
+if (Test-Path ".\uninstall_usbip_drivers.ps1") {
+    & ".\uninstall_usbip_drivers.ps1"
+} else {
+    Write-Host "Warning: uninstall_usbip_drivers.ps1 not found. Skipping cleanup." -ForegroundColor Yellow
+}
+
 # 1. Stage the drivers into the Windows Driver Store
 Write-Host "[1/5] Staging UDE and Filter drivers into system..." -ForegroundColor Cyan
 pnputil.exe /add-driver .\usbip2_ude.inf /install
@@ -14,7 +22,6 @@ pnputil.exe /add-driver .\usbip2_filter.inf /install
 # 2. Create the Virtual Hardware Root Device Node using the verified installer syntax
 Write-Host "[2/5] Instantiating Virtual Root Device Node..." -ForegroundColor Cyan
 .\devnode.exe install .\usbip2_ude.inf ROOT\USBIP_WIN2\UDE
-
 
 # 4. Refresh the hardware layer to wake the SCM and start the services
 Write-Host "[4/5] Triggering Plug-and-Play hardware rescan..." -ForegroundColor Cyan

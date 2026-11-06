@@ -3,13 +3,16 @@
 # Run as Administrator, or the script will request elevation.
 #
 # SAFETY:
-# - Does NOT remove the Windows Driver Store VBoxUSB package (oem*.inf).
+# - Does NOT remove the Windows Driver Store VBoxUSB package (oem*.inf) unless -Force is specified.
 # - Does NOT uninstall VirtualBox or usbipd-win.
-# - Removes VBoxUSBMon service only if it points to the installer's System32 copy.
+# - Removes VBoxUSBMon service only if it points to the installer's System32 copy (or forcefully if -Force is specified).
 # - Use -RemoveCustomDriverFiles to remove the custom Program Files folder too.
 
 #Requires -Version 5.1
-param([switch]$RemoveCustomDriverFiles)
+param(
+    [switch]$RemoveCustomDriverFiles,
+    [switch]$Force
+)
 
 $ErrorActionPreference = "Stop"
 $InstallDir = Join-Path ${env:ProgramFiles} "USBIP"
@@ -31,6 +34,7 @@ if (-not (Is-Administrator)) {
     try {
         $args = '-NoProfile -ExecutionPolicy Bypass -File "' + $PSCommandPath + '"'
         if ($RemoveCustomDriverFiles) { $args += ' -RemoveCustomDriverFiles' }
+        if ($Force) { $args += ' -Force' }
         Start-Process powershell.exe -Verb RunAs -ArgumentList $args -Wait
         exit $LASTEXITCODE
     } catch {
@@ -44,6 +48,9 @@ Write-Host ""
 Write-Host "USB/IP C Real Passthrough Uninstaller" -ForegroundColor White
 Write-Host "-------------------------------------" -ForegroundColor White
 Warn "This removes the custom setup only; it does not uninstall VirtualBox or usbipd-win."
+if ($Force) {
+    Warn "Force mode enabled: VBoxUSB driver store packages will also be targeted for removal."
+}
 Write-Host ""
 
 # Remove installer-created firewall rules.
@@ -65,14 +72,14 @@ foreach ($ruleName in $FirewallRulesToRemove) {
     } catch { Warn "Could not remove firewall rule $ruleName : $($_.Exception.Message)" }
 }
 
-# Remove VBoxUSBMon service only if its binary path matches our installer's copy.
+# Remove VBoxUSBMon service.
 try {
     $svc = Get-CimInstance Win32_SystemDriver -Filter "Name='VBoxUSBMon'" -ErrorAction SilentlyContinue
     if ($svc) {
         $servicePath = [Environment]::ExpandEnvironmentVariables([string]$svc.PathName).Trim('"')
         $normalized = $servicePath.Replace("\??\", "").Replace("\\?\", "")
-        if ($normalized -ieq $InstalledMonSys) {
-            Warn "VBoxUSBMon service points to the installer-managed file: $servicePath"
+        if ($Force -or ($normalized -ieq $InstalledMonSys)) {
+            Warn "VBoxUSBMon service matches removal criteria: $servicePath"
             & sc.exe stop $ServiceName 2>&1 | ForEach-Object { Write-Host "    $_" }
             & sc.exe delete $ServiceName 2>&1 | ForEach-Object { Write-Host "    $_" }
             Ok "Requested removal of VBoxUSBMon service registration."
@@ -87,6 +94,22 @@ try {
         }
     } else { Info "VBoxUSBMon service not found." }
 } catch { Warn "Could not clean up VBoxUSBMon service: $($_.Exception.Message)" }
+
+# Forcefully remove VBoxUSB driver store packages if -Force is specified
+if ($Force) {
+    Info "Searching for VBoxUSB Driver Store packages (oem*.inf)..."
+    try {
+        $oemDrivers = Get-WindowsDriver -Online -All | Where-Object { $_.ProviderName -like "*Oracle*" -or $_.OriginalFileName -like "*vboxusb*" }
+        foreach ($driver in $oemDrivers) {
+            $infName = $driver.Driver
+            Info "Removing driver package: $infName ($($driver.OriginalFileName))"
+            & pnputil.exe /delete-driver $infName /uninstall /force 2>&1 | ForEach-Object { Write-Host "    $_" }
+        }
+        Ok "Driver store package cleanup completed."
+    } catch {
+        Warn "Could not completely purge driver store packages: $($_.Exception.Message)"
+    }
+}
 
 # Remove custom install folder if present or requested.
 if ($RemoveCustomDriverFiles) {
@@ -104,4 +127,9 @@ if ($RemoveCustomDriverFiles) {
 
 Write-Host ""
 Write-Host "Uninstall steps finished." -ForegroundColor Green
-Write-Host "The VBoxUSB Driver Store package (oem*.inf) was intentionally retained because it may be shared with other software."
+if ($Force) {
+    Write-Host "Force option was used; attempted removal of VBoxUSB Driver Store packages."
+} else {
+    Write-Host "The VBoxUSB Driver Store package (oem*.inf) was intentionally retained because it may be shared with other software."
+    Write-Host "To force remove driver store packages as well, use the -Force switch."
+}
