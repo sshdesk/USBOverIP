@@ -3,6 +3,7 @@
 #include "api/create_peerconnection_factory.h"
 #include <spdlog/spdlog.h>
 #include <vector>
+#include "json.hpp"
 
 WebRtcManager::WebRtcManager(const std::string& room_id, const std::string& client_id, bool is_Client)
     : room_id_(room_id), my_client_id_(client_id), is_Client(is_Client), pc_observer_(*this), dc_observer_(*this) {
@@ -78,7 +79,7 @@ void WebRtcManager::StartConnectionSequence() {
     }
 
     if (is_Client) {
-        SPDLOG_WARN("[WebRTC Sequence Engine] Room Ready Hook captured. Commencing asynchronous CreateOffer execution loop...");
+        SPDLOG_INFO("[WebRTC Sequence Engine] Room Ready Hook captured. Commencing asynchronous CreateOffer execution loop...");
         
         rtc::scoped_refptr<InternalCreateSessionDescriptionObserver> observer(
             new rtc::RefCountedObject<InternalCreateSessionDescriptionObserver>(*this)
@@ -98,7 +99,6 @@ void WebRtcManager::StartConnectionSequence() {
 void WebRtcManager::ShutdownConnection() {
     SPDLOG_INFO("[WebRTC TearDown] Terminating secure media sessions and closing thread attachments.");
     
-    // Explicitly notify state change listener about closure before tearing down
     if (data_channel_ && dc_state_callback_) {
         dc_state_callback_(false);
     }
@@ -119,9 +119,16 @@ void WebRtcManager::ShutdownConnection() {
     
     SPDLOG_INFO("[WebRTC TearDown] Native execution thread pools successfully unmounted.");
 }
+
 void WebRtcManager::HandleRemoteSdp(const std::string& type, const std::string& sdp) {
     if (!peer_connection_) {
         SPDLOG_ERROR("[WebRTC Router] Cannot assign remote SDP payload. PeerConnection pointer reference is null.");
+        return;
+    }
+
+    auto signaling_state = peer_connection_->signaling_state();
+    if (type == "answer" && signaling_state != webrtc::PeerConnectionInterface::kHaveLocalOffer) {
+        SPDLOG_WARN("[WebRTC Router] Ignoring duplicate or late remote answer. Current signaling state is not kHaveLocalOffer.");
         return;
     }
 
@@ -139,8 +146,20 @@ void WebRtcManager::HandleRemoteSdp(const std::string& type, const std::string& 
 
     SPDLOG_INFO("[WebRTC Router] Applying parsed remote description context via SetRemoteDescription()...");
     peer_connection_->SetRemoteDescription(InternalSetSessionDescriptionObserver::Create(), desc.release());
+    remote_description_set_ = true;
+
+    SPDLOG_INFO("[WebRTC Router] Remote description set. Flushing {} buffered ICE candidates...", pending_ice_candidates_.size());
+    for (const auto& candidate_info : pending_ice_candidates_) {
+        HandleRemoteIceCandidate(candidate_info.mid, candidate_info.mline_index, candidate_info.sdp);
+    }
+    pending_ice_candidates_.clear();
 
     if (sdp_type == webrtc::SdpType::kOffer) {
+        if (peer_connection_->local_description() != nullptr) {
+            SPDLOG_WARN("[WebRTC Router] Offer received again, but local description already exists. Skipping duplicate answer generation.");
+            return;
+        }
+
         SPDLOG_INFO("[WebRTC Router] Remote Offer successfully processed. Transitioning Callee to generate Answer payload...");
 
         rtc::scoped_refptr<InternalCreateSessionDescriptionObserver> observer(
@@ -158,6 +177,12 @@ void WebRtcManager::HandleRemoteSdp(const std::string& type, const std::string& 
 
 void WebRtcManager::HandleRemoteIceCandidate(const std::string& mid, int mline_index, const std::string& sdp) {
     if (!peer_connection_) return;
+
+    if (!remote_description_set_) {
+        SPDLOG_WARN("[WebRTC Router] Remote description not set yet. Buffering ICE candidate.");
+        pending_ice_candidates_.push_back({mid, mline_index, sdp});
+        return;
+    }
 
     SPDLOG_INFO("[WebRTC Router] Ingesting remote candidate line parameters -> sdpMid: [{}], sdpMLineIndex: [{}]", mid, mline_index);
     webrtc::SdpParseError parse_err;
@@ -188,11 +213,15 @@ void WebRtcManager::InternalPeerConnectionObserver::OnIceCandidate(const webrtc:
     }
 
     SPDLOG_INFO("[WebRTC Callback] New local ICE candidate gathered for target: {} -> sdpMid: {}", manager_.remote_peer_id_, candidate->sdp_mid());
-    std::string ice_packet = "ICE:" + candidate->sdp_mid() + ":" + 
-                             std::to_string(candidate->sdp_mline_index()) + ":" + candidate_str;
+    
+    nlohmann::json j;
+    j["type"] = "ice";
+    j["mid"] = candidate->sdp_mid();
+    j["mline_index"] = candidate->sdp_mline_index();
+    j["candidate"] = candidate_str;
 
     if (!manager_.remote_peer_id_.empty()) {
-        SendTargetedMessage(manager_.room_id_, manager_.my_client_id_, manager_.remote_peer_id_, ice_packet);
+        SendTargetedMessage(manager_.room_id_, manager_.my_client_id_, manager_.remote_peer_id_, j.dump());
     } else {
         SPDLOG_ERROR("[WebRTC Error] Cannot send ICE candidate: remote_peer_id_ is empty!");
     }
@@ -207,21 +236,26 @@ void WebRtcManager::InternalPeerConnectionObserver::OnConnectionChange(webrtc::P
 }
 
 void WebRtcManager::InternalPeerConnectionObserver::OnDataChannel(rtc::scoped_refptr<webrtc::DataChannelInterface> data_channel) {
-    SPDLOG_WARN("[WebRTC Callback] Remote negotiated DataChannel caught! Binding Callee observer loops...");
+    SPDLOG_INFO("[WebRTC OnDataChannel");
     manager_.data_channel_ = data_channel;
     data_channel->RegisterObserver(&manager_.dc_observer_);
 }
 
 void WebRtcManager::InternalCreateSessionDescriptionObserver::OnSuccess(webrtc::SessionDescriptionInterface* desc) {
-    SPDLOG_WARN("[WebRTC Callback] SessionDescription generated successfully!");
+    SPDLOG_INFO("[WebRTC Callback] SessionDescription generated successfully!");
     manager_.peer_connection_->SetLocalDescription(InternalSetSessionDescriptionObserver::Create(), desc);
     std::string sdp_text;
     desc->ToString(&sdp_text);
-    std::string type_str = (desc->GetType() == webrtc::SdpType::kOffer) ? "SDP_OFFER:" : "SDP_ANSWER:";
     
-    SPDLOG_INFO("[WebRTC Callback] Dispatching generated local SDP to target: {}", manager_.remote_peer_id_);
+    std::string type_str = (desc->GetType() == webrtc::SdpType::kOffer) ? "offer" : "answer";
+    
+    nlohmann::json j;
+    j["type"] = type_str;
+    j["sdp"] = sdp_text;
+
+    SPDLOG_INFO("[WebRTC Callback] Dispatching generated local SDP JSON to target: {}", manager_.remote_peer_id_);
     if (!manager_.remote_peer_id_.empty()) {
-        SendTargetedMessage(manager_.room_id_, manager_.my_client_id_, manager_.remote_peer_id_, type_str + sdp_text);
+        SendTargetedMessage(manager_.room_id_, manager_.my_client_id_, manager_.remote_peer_id_, j.dump());
     } else {
         SPDLOG_ERROR("[WebRTC Error] Cannot send SDP: remote_peer_id_ is empty!");
     }
@@ -242,13 +276,9 @@ void WebRtcManager::InternalDataChannelObserver::OnStateChange() {
         
         bool is_open = (current_state == webrtc::DataChannelInterface::kOpen);
         if (is_open) {
-            SPDLOG_WARN("DataChannel Open! You can now send messages.");
-            std::string greeting = "Hello from peer identity token: [" + manager_.my_client_id_ + "]";
-            webrtc::DataBuffer buffer(greeting);
-            manager_.data_channel_->Send(buffer);
+            SPDLOG_INFO("DataChannel Open! You can now send messages.");
         }
 
-        // Trigger the registered event callback instantly
         if (manager_.dc_state_callback_) {
             manager_.dc_state_callback_(is_open);
         }
@@ -256,12 +286,8 @@ void WebRtcManager::InternalDataChannelObserver::OnStateChange() {
 }
 
 void WebRtcManager::InternalDataChannelObserver::OnMessage(const webrtc::DataBuffer& buffer) {
-    std::string msg(reinterpret_cast<const char*> (buffer.data.data()), buffer.data.size());
+    std::string msg(reinterpret_cast<const char*>(buffer.data.data()), buffer.data.size());
     SPDLOG_INFO("[DATA CHANNEL RECEIVED BUFFER]: {}", msg);
-    
-   //  std::string greeting = "Hello from peer identity token: [" + manager_.my_client_id_ + "]";
-    //        webrtc::DataBuffer buffer(greeting);
-        //    manager_.data_channel_->Send(buffer);
 }
 
 bool WebRtcManager::IsDataChannelOpen() const {

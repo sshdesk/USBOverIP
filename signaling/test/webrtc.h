@@ -4,6 +4,7 @@
 #include <string>
 #include <functional>
 #include <memory>
+#include <vector>
 #include "api/peer_connection_interface.h"
 #include "api/data_channel_interface.h"
 #include "rtc_base/thread.h"
@@ -39,6 +40,14 @@ private:
     std::string my_client_id_;
     std::string remote_peer_id_;
     bool is_Client;
+
+    bool remote_description_set_ = false;
+    struct BufferedCandidate {
+        std::string mid;
+        int mline_index;
+        std::string sdp;
+    };
+    std::vector<BufferedCandidate> pending_ice_candidates_;
 
     std::unique_ptr<rtc::Thread> network_thread_;
     std::unique_ptr<rtc::Thread> worker_thread_;
