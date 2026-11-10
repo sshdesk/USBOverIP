@@ -2,6 +2,10 @@
 #include "logsync.h"
 #include "usbip_commands.h"
 #include "usbipd_commands.h"
+#include "signaling.h"
+#include "webrtc_usbipd.h"
+#include "tcptunnel.h"
+
 #include <iostream>
 #include <string>
 #include <cstdlib>
@@ -13,22 +17,12 @@
 #include <thread>
 #include <chrono>
 #include <spdlog/spdlog.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
+#include "json.hpp"
+#define CPPHTTPLIB_OPENSSL_SUPPORT
+#include "httplib.h"
 
-#if defined(_WIN32)
-#include <io.h>
-#define DUP _dup
-#define DUP2 _dup2
-#define CLOSE _close
-#else
-#include <unistd.h>
-#define DUP dup
-#define DUP2 dup2
-#define CLOSE close
-#endif
-
-#include "signaling.h"
-#include "webrtc_usbipd.h"
-#include "tcptunnel.h"
+using json = nlohmann::json;
 
 std::atomic<bool> keep_running{true};
 std::atomic<bool> is_datachannel_connected{false};
@@ -50,9 +44,22 @@ std::mutex g_log_mutex;
 GUI g_headless_gui;
 GUI* g_active_gui = &g_headless_gui;
 
+
+static httplib::ws::WebSocket* g_active_ws = nullptr;
+static std::mutex g_ws_mutex;
+
 void EmitEvent(const std::string& type, const std::string& payload) {
-    std::cout << "IPC_EVENT:[" << type << "] " << payload << std::endl;
-    std::cout.flush();
+    json j;
+    j["type"] = type;
+    j["payload"] = payload;
+
+    std::lock_guard<std::mutex> lock(g_ws_mutex);
+    if (g_active_ws) {
+        g_active_ws->send(j.dump());
+    }
+    
+    // Fallback/mirror log to console
+    SPDLOG_INFO("WSS_EVENT: [{}] {}", type, payload);
 }
 
 void GUI::setLabelText(const std::string& text) {
@@ -71,13 +78,12 @@ std::string GUI::getInputText() const
 void FetchAndDisplayRemoteDevices() {
     std::string temp_file = "usbip_devices_temp.txt";
 
-    // Safely redirect stdout using descriptor duplication
-    int original_stdout = DUP(_fileno(stdout));
-    FILE *fp = nullptr;
+    // Redirect stdout to temp file to capture usbip list output
+    FILE* stream = nullptr;
 #if defined(_WIN32)
-    freopen_s(&fp, temp_file.c_str(), "w", stdout);
+    freopen_s(&stream, temp_file.c_str(), "w", stdout);
 #else
-    fp = freopen(temp_file.c_str(), "w", stdout);
+    stream = freopen(temp_file.c_str(), "w", stdout);
 #endif
 
     if (g_usbip) {
@@ -85,9 +91,12 @@ void FetchAndDisplayRemoteDevices() {
     }
     fflush(stdout);
 
-    // Restore stdout back to the parent Node.js pipe
-    DUP2(original_stdout, _fileno(stdout));
-    CLOSE(original_stdout);
+    // Restore stdout back to standard output
+#if defined(_WIN32)
+    freopen_s(&stream, "CONOUT$", "w", stdout);
+#else
+    freopen("/dev/tty", "w", stdout);
+#endif
 
     std::ifstream infile(temp_file);
     if (!infile.is_open()) {
@@ -173,133 +182,193 @@ void InitializeTunnelCallbacks() {
         EmitEvent("TCP_CLIENT", "disconnected");
     });
 
-    // Register low-frequency cumulative total received bytes callback from WebRTC data channel
     g_usbip->getTunnelManager()->RegisterOnDataChannelTotalReceivedCallback([](uint64_t total_bytes) {
         SPDLOG_INFO("[Callback] Cumulative data received from WebRTC data channel: {} bytes", total_bytes);
         EmitEvent("DATA_RECEIVED", std::to_string(total_bytes));
     });
 }
 
-int main(int argc, char* argv[]) {
-    rtc::LogMessage::LogToDebug(rtc::LoggingSeverity::LS_ERROR);
-
-    // Stream logs to console stdout so Electron captures them
-    auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-    spdlog::default_logger()->sinks().push_back(console_sink);
-    spdlog::set_level(spdlog::level::info);
-
-    EmitEvent("READY", "Backend operational");
-
-    std::string line;
-    while (keep_running && std::getline(std::cin, line)) {
-        if (line.empty()) continue;
-
-        if (line.rfind("SET_ROOM:", 0) == 0) {
-            active_room_id = line.substr(9);
-            EmitEvent("TOKEN_ID", active_room_id);
+void HandleCommand(const std::string& cmd) {
+    if (cmd.rfind("SET_ROOM:", 0) == 0) {
+        active_room_id = cmd.substr(9);
+        EmitEvent("TOKEN_ID", active_room_id);
+    }
+    else if (cmd == "HOST_LOCAL") {
+        local_usb_triggered = true;
+        if (!g_usbipd) {
+            g_usbipd = new UsbIpdCommands();
         }
-        else if (line == "HOST_LOCAL") {
-            local_usb_triggered = true;
-            if (!g_usbipd) {
-                g_usbipd = new UsbIpdCommands();
-            }
 
-            EmitEvent("CLEAR_LOCAL_DEVICES", "");
-            for (const auto& dev : g_usbipd->listPhysicalDevices()) {
-                EmitEvent("LOCAL_DEVICE", dev);
-            }
-
-            if (!is_datachannel_connected && !is_session_starting) {
-                is_session_starting = true;
-                if (!g_usbipd->startHostSession(active_room_id, global_client_id)) {
-                    is_session_starting = false;
-                    EmitEvent("ERROR", "Failed to initialize host sharing session");
-                } else {
-                    EmitEvent("STATE", "Hosting local USB devices on room: " + active_room_id);
-                    EmitEvent("TOKEN_ID", active_room_id);
-                    EmitEvent("CLIENT_ID", global_client_id);
-                }
-            }
+        EmitEvent("CLEAR_LOCAL_DEVICES", "");
+        for (const auto& dev : g_usbipd->listPhysicalDevices()) {
+            EmitEvent("LOCAL_DEVICE", dev);
         }
-        else if (line == "CONNECT_REMOTE") {
-            if (remote_usb_triggered) {
-                EmitEvent("ERROR", "Tunnel already active. Please detach first.");
-                continue;
-            }
 
-            remote_usb_triggered = true;
-            g_usbip = new UsbIpCommands();
-
-            InitializeTunnelCallbacks();
-
-            EmitEvent("STATE", "Initializing WebRTC tunnel to remote host...");
-            int ret = g_usbip->initializeTunnelSession();
-            if (ret < 0) {
-                EmitEvent("ERROR", "Failed to establish client tunnel");
-                remote_usb_triggered = false;
-                delete g_usbip;
-                g_usbip = nullptr;
+        if (!is_datachannel_connected && !is_session_starting) {
+            is_session_starting = true;
+            if (!g_usbipd->startHostSession(active_room_id, global_client_id)) {
+                is_session_starting = false;
+                EmitEvent("ERROR", "Failed to initialize host sharing session");
             } else {
+                EmitEvent("STATE", "Hosting local USB devices on room: " + active_room_id);
                 EmitEvent("TOKEN_ID", active_room_id);
                 EmitEvent("CLIENT_ID", global_client_id);
             }
         }
-        else if (line == "REFRESH_DEVICES") {
-            if (is_datachannel_connected && g_usbip) {
-                std::thread([]() {
-                    FetchAndDisplayRemoteDevices();
-                }).detach();
-            } else {
-                EmitEvent("ERROR", "DataChannel not connected yet.");
-            }
+    }
+    else if (cmd == "CONNECT_REMOTE") {
+        if (remote_usb_triggered) {
+            EmitEvent("ERROR", "Tunnel already active. Please detach first.");
+            return;
         }
-        else if (line.rfind("ATTACH:", 0) == 0) {
-            std::string busid = line.substr(7);
-            if (is_usbip_busy) {
-                EmitEvent("ERROR", "An attach/detach operation is already running.");
-                continue;
-            }
 
-            is_usbip_busy = true;
-            EmitEvent("BUSY", "true");
-            EmitEvent("STATE", "Attaching device " + busid + "...");
+        remote_usb_triggered = true;
+        g_usbip = new UsbIpCommands();
 
-            std::thread([busid]() {
-                if (g_usbip) {
-                    g_usbip->executeCommand({"attach", "-r", "127.0.0.1", "-b", busid});
-                }
-                is_usbip_busy = false;
-                EmitEvent("BUSY", "false");
-                EmitEvent("STATE", "Device " + busid + " attached successfully.");
+        InitializeTunnelCallbacks();
+
+        EmitEvent("STATE", "Initializing WebRTC tunnel to remote host...");
+        int ret = g_usbip->initializeTunnelSession();
+        if (ret < 0) {
+            EmitEvent("ERROR", "Failed to establish client tunnel");
+            remote_usb_triggered = false;
+            delete g_usbip;
+            g_usbip = nullptr;
+        } else {
+            EmitEvent("TOKEN_ID", active_room_id);
+            EmitEvent("CLIENT_ID", global_client_id);
+        }
+    }
+    else if (cmd == "REFRESH_DEVICES") {
+        if (is_datachannel_connected && g_usbip) {
+            std::thread([]() {
+                FetchAndDisplayRemoteDevices();
             }).detach();
+        } else {
+            EmitEvent("ERROR", "DataChannel not connected yet.");
         }
-        else if (line == "DETACH") {
-            if (is_usbip_busy) {
-                EmitEvent("ERROR", "An operation is already in progress.");
-                continue;
-            }
+    }
+    else if (cmd.rfind("ATTACH:", 0) == 0) {
+        std::string busid = cmd.substr(7);
+        if (is_usbip_busy) {
+            EmitEvent("ERROR", "An attach/detach operation is already running.");
+            return;
+        }
 
-            is_usbip_busy = true;
-            EmitEvent("BUSY", "true");
-            EmitEvent("STATE", "Detaching all remote devices and closing tunnel...");
+        is_usbip_busy = true;
+        EmitEvent("BUSY", "true");
+        EmitEvent("STATE", "Attaching device " + busid + "...");
 
-            if (remote_usb_triggered && g_usbip) {
-                g_usbip->shutdown();
-                delete g_usbip;
-                g_usbip = nullptr;
-                remote_usb_triggered = false;
+        std::thread([busid]() {
+            if (g_usbip) {
+                g_usbip->executeCommand({"attach", "-r", "127.0.0.1", "-b", busid});
             }
-            is_datachannel_connected = false;
-            EmitEvent("DATACHANNEL", "closed");
-            EmitEvent("CLEAR_REMOTE_DEVICES", "");
             is_usbip_busy = false;
             EmitEvent("BUSY", "false");
-            EmitEvent("STATE", "Detached successfully.");
+            EmitEvent("STATE", "Device " + busid + " attached successfully.");
+        }).detach();
+    }
+    else if (cmd == "DETACH") {
+        if (is_usbip_busy) {
+            EmitEvent("ERROR", "An operation is already in progress.");
+            return;
         }
-        else if (line == "EXIT") {
-            keep_running = false;
-            break;
+
+        is_usbip_busy = true;
+        EmitEvent("BUSY", "true");
+        EmitEvent("STATE", "Detaching all remote devices and closing tunnel...");
+
+        if (remote_usb_triggered && g_usbip) {
+            g_usbip->shutdown();
+            delete g_usbip;
+            g_usbip = nullptr;
+            remote_usb_triggered = false;
         }
+        is_datachannel_connected = false;
+        EmitEvent("DATACHANNEL", "closed");
+        EmitEvent("CLEAR_REMOTE_DEVICES", "");
+        is_usbip_busy = false;
+        EmitEvent("BUSY", "false");
+        EmitEvent("STATE", "Detached successfully.");
+    }
+}
+
+int main(int argc, char* argv[]) {
+    rtc::LogMessage::LogToDebug(rtc::LoggingSeverity::LS_ERROR);
+
+    // Stream logs to console stdout
+    auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+    spdlog::default_logger()->sinks().push_back(console_sink);
+    spdlog::set_level(spdlog::level::info);
+
+    // Determine port from command line argument if supplied (default to 8080)
+    int port = 8080;
+    if (argc > 1) {
+        try {
+            port = std::stoi(argv[1]);
+        } catch (...) {
+            port = 8080;
+        }
+    }
+
+    // SSL Certificate paths (ensure cert.pem and key.pem are present)
+    const char* cert_path = "cert.pem";
+    const char* key_path = "key.pem";
+
+    httplib::SSLServer svr(cert_path, key_path);
+    if (!svr.is_valid()) {
+        SPDLOG_ERROR("Error: SSL server initialization failed. Check certificate and key paths.");
+        return 1;
+    }
+
+    svr.WebSocket("/ws", [](const httplib::Request& req, httplib::ws::WebSocket& ws) {
+        SPDLOG_INFO("Electron client connected via Secure WebSocket (WSS).");
+        {
+            std::lock_guard<std::mutex> lock(g_ws_mutex);
+            g_active_ws = &ws;
+        }
+
+        // Notify ready state
+        json ready_event;
+        ready_event["type"] = "READY";
+        ready_event["payload"] = "Backend operational";
+        ws.send(ready_event.dump());
+
+        std::string msg;
+        while (ws.read(msg)) {
+            if (msg == "EXIT") {
+                ws.send("Closing connection.");
+                ws.close();
+                keep_running = false;
+                break;
+            }
+
+            SPDLOG_INFO("Received command from Electron: {}", msg);
+            HandleCommand(msg);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(g_ws_mutex);
+            if (g_active_ws == &ws) {
+                g_active_ws = nullptr;
+            }
+        }
+        SPDLOG_INFO("Electron client disconnected.");
+    });
+
+    std::thread server_thread([&svr, port]() {
+        SPDLOG_INFO("Starting C++ WSS server on port {}...", port);
+        svr.listen("0.0.0.0", port);
+    });
+
+    // Main execution loop waiting for shutdown signal
+    while (keep_running) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    svr.stop();
+    if (server_thread.joinable()) {
+        server_thread.join();
     }
 
     if (remote_usb_triggered && g_usbip) {

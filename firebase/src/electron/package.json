@@ -1,10 +1,13 @@
 {
   "name": "webrtc-usbip-gui",
   "version": "1.0.0",
-  "description": "Cross-platform Electron GUI for WebRTC USB/IP",
+  "description": "Cross-platform Electron GUI for WebRTC USB/IP via WebSockets",
   "main": "main.js",
   "scripts": {
     "start": "electron ."
+  },
+  "dependencies": {
+    "ws": "^8.16.0"
   },
   "devDependencies": {
     "electron": "^29.0.0"

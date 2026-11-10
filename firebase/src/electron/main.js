@@ -2,9 +2,19 @@ const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
+const WebSocket = require('ws');
 
 let mainWindow = null;
 let cppProcess = null;
+let wsClient = null;
+
+// Prevent cache and profile locks when running multiple instances
+if (process.env.INSTANCE_ID) {
+  app.setPath('userData', path.join(app.getPath('appData'), `webrtc-usbip-gui-${process.env.INSTANCE_ID}`));
+}
+
+// Assign distinct ports based on INSTANCE_ID to avoid port conflicts
+const backendPort = process.env.INSTANCE_ID === '2' ? 8081 : 8080;
 
 function resolveBinaryPath() {
   const binaryName = process.platform === 'win32' ? 'guiElectron.exe' : 'guiElectron';
@@ -39,6 +49,40 @@ function createWindow() {
   mainWindow.loadFile('index.html');
 }
 
+function connectWebSocket() {
+  wsClient = new WebSocket(`wss://localhost:${backendPort}/ws`, {
+    rejectUnauthorized: false
+  });
+
+  wsClient.on('open', () => {
+    console.log(`Connected to C++ Secure WebSocket backend on port ${backendPort}.`);
+  });
+
+  wsClient.on('message', (data) => {
+    try {
+      const parsed = JSON.parse(data.toString());
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('backend:event', parsed);
+      }
+    } catch (e) {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('backend:log', data.toString());
+      }
+    }
+  });
+
+  wsClient.on('close', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('backend:event', { type: 'STATE', payload: 'Secure WebSocket disconnected. Reconnecting...' });
+    }
+    setTimeout(connectWebSocket, 2000);
+  });
+
+  wsClient.on('error', (err) => {
+    console.error('WebSocket error:', err.message);
+  });
+}
+
 function startBackend() {
   const binPath = resolveBinaryPath();
   if (!fs.existsSync(binPath)) {
@@ -47,35 +91,23 @@ function startBackend() {
   }
 
   const workingDir = path.dirname(binPath);
-  cppProcess = spawn(binPath, [], {
+  // Pass the dynamic port as an argument to the C++ binary
+  cppProcess = spawn(binPath, [backendPort.toString()], {
     cwd: workingDir,
     stdio: ['pipe', 'pipe', 'pipe']
   });
 
   cppProcess.stdout.on('data', (chunk) => {
-    const lines = chunk.toString().split('\n');
-    for (const rawLine of lines) {
-      const line = rawLine.trim();
-      if (!line) continue;
-
-      const eventMatch = line.match(/^IPC_EVENT:\[(.*?)\]\s*(.*)$/);
-      if (eventMatch) {
-        const type = eventMatch[1];
-        const payload = eventMatch[2];
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('backend:event', { type, payload });
-        }
-      } else {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('backend:log', line);
-        }
-      }
+    const line = chunk.toString().trim();
+    if (line && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('backend:log', line);
     }
   });
 
   cppProcess.stderr.on('data', (chunk) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('backend:log', `[STDERR] ${chunk.toString().trim()}`);
+    const line = chunk.toString().trim();
+    if (line && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('backend:log', `[STDERR] ${line}`);
     }
   });
 
@@ -85,6 +117,8 @@ function startBackend() {
     }
     cppProcess = null;
   });
+
+  setTimeout(connectWebSocket, 1000);
 }
 
 app.whenReady().then(() => {
@@ -93,21 +127,22 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
+  if (wsClient && wsClient.readyState === WebSocket.OPEN) {
+    wsClient.send('EXIT');
+    wsClient.close();
+  }
   if (cppProcess) {
     try {
-      cppProcess.stdin.write('EXIT\n');
+      cppProcess.kill('SIGTERM');
     } catch (_) {}
-    setTimeout(() => {
-      if (cppProcess) cppProcess.kill('SIGTERM');
-    }, 1500);
   }
   if (process.platform !== 'darwin') app.quit();
 });
 
 ipcMain.handle('backend:send', (event, command) => {
-  if (!cppProcess || !cppProcess.stdin.writable) {
-    return { success: false, error: 'Backend process is not running.' };
+  if (!wsClient || wsClient.readyState !== WebSocket.OPEN) {
+    return { success: false, error: 'Secure WebSocket not connected to backend.' };
   }
-  cppProcess.stdin.write(`${command}\n`);
+  wsClient.send(command);
   return { success: true };
 });
