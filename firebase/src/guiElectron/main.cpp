@@ -59,17 +59,14 @@ void GUI::setLabelText(const std::string& text) {
     EmitEvent("STATE", text);
 }
 
-
-
 void GUI::setInputText(const std::string& text) { 
-    EmitEvent("STATE", text); 
+    EmitEvent("INPUT_TEXT", text); 
 }
 
 std::string GUI::getInputText() const 
 { 
     return ""; 
 }
-
 
 void FetchAndDisplayRemoteDevices() {
     std::string temp_file = "usbip_devices_temp.txt";
@@ -174,6 +171,12 @@ void InitializeTunnelCallbacks() {
     g_usbip->getTunnelManager()->RegisterOnTcpClientDisconnectedCallback([]() {
         SPDLOG_WARN("[Callback] TCP client disconnected from the tunnel.");
         EmitEvent("TCP_CLIENT", "disconnected");
+    });
+
+    // Register low-frequency cumulative total received bytes callback from WebRTC data channel
+    g_usbip->getTunnelManager()->RegisterOnDataChannelTotalReceivedCallback([](uint64_t total_bytes) {
+        SPDLOG_INFO("[Callback] Cumulative data received from WebRTC data channel: {} bytes", total_bytes);
+        EmitEvent("DATA_RECEIVED", std::to_string(total_bytes));
     });
 }
 

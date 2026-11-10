@@ -64,6 +64,14 @@ window.bridge.onEvent((event) => {
       lblStatus.textContent = payload;
       break;
 
+    case 'INPUT_TEXT':
+      roomInput.value = payload;
+      break;
+
+    case 'DATA_RECEIVED':
+      lblStatus.textContent = `Cumulative data received: ${payload} bytes`;
+      break;
+
     case 'ERROR':
       lblStatus.textContent = `Error: ${payload}`;
       appendLog(`[ERROR] ${payload}`);
