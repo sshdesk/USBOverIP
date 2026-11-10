@@ -1,5 +1,6 @@
 let selectedBusId = null;
 
+const chkRemoteUsb = document.getElementById('chkRemoteUsb');
 const btnHost = document.getElementById('btnHost');
 const btnConnect = document.getElementById('btnConnect');
 const btnRefresh = document.getElementById('btnRefresh');
@@ -14,6 +15,26 @@ const lblRoom = document.getElementById('lblRoom');
 const badgeDc = document.getElementById('badgeDc');
 const deviceList = document.getElementById('deviceList');
 const logBox = document.getElementById('logBox');
+
+function updateToolbarLayout() {
+  const isRemote = chkRemoteUsb.checked;
+  if (isRemote) {
+    btnHost.style.display = 'none';
+    btnConnect.style.display = 'inline-block';
+    btnRefresh.style.display = 'inline-block';
+    btnAttach.style.display = 'inline-block';
+    btnDetach.style.display = 'inline-block';
+  } else {
+    btnHost.style.display = 'inline-block';
+    btnConnect.style.display = 'none';
+    btnRefresh.style.display = 'none';
+    btnAttach.style.display = 'none';
+    btnDetach.style.display = 'none';
+  }
+}
+
+chkRemoteUsb.addEventListener('change', updateToolbarLayout);
+updateToolbarLayout();
 
 function appendLog(line) {
   const row = document.createElement('div');

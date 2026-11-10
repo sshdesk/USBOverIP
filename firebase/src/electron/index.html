@@ -13,6 +13,8 @@
     input[type="text"] { background: #16161a; border: 1px solid #444450; color: #fff; padding: 8px 12px; border-radius: 4px; outline: none; font-size: 13px; }
     input[type="text"]:focus { border-color: #5865f2; }
     
+    label { font-size: 13px; display: flex; align-items: center; gap: 6px; cursor: pointer; color: #ccc; user-select: none; }
+    
     button { background: #3a3a46; border: none; color: #fff; padding: 8px 14px; border-radius: 4px; font-size: 13px; font-weight: 500; cursor: pointer; transition: background 0.15s; }
     button:hover { background: #4a4a58; }
     button:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -43,12 +45,19 @@
 <body>
 
   <div class="panel toolbar">
+    <label>
+      <input type="checkbox" id="chkRemoteUsb"> For remote USB
+    </label>
     <input type="text" id="roomInput" placeholder="Room ID (leave empty to auto-generate)" style="width: 240px;">
-    <button id="btnHost" class="btn-primary">Host (Local USB)</button>
-    <button id="btnConnect" class="btn-purple">Connect (Remote USB)</button>
-    <button id="btnRefresh">Refresh Devices</button>
-    <button id="btnAttach" class="btn-purple" disabled>Attach Selected</button>
-    <button id="btnDetach" class="btn-danger">Detach All</button>
+    
+    <!-- Local USB Button -->
+    <button id="btnHost" class="btn-primary">Connect</button>
+
+    <!-- Remote USB Buttons (Hidden by default unless checkbox is ticked) -->
+    <button id="btnConnect" class="btn-purple" style="display: none;">Connect</button>
+    <button id="btnRefresh" style="display: none;">Refresh Devices</button>
+    <button id="btnAttach" class="btn-purple" style="display: none;" disabled>RemoteAttach</button>
+    <button id="btnDetach" class="btn-danger" style="display: none;">RemoteDetach</button>
   </div>
 
   <div class="status-bar">
@@ -64,7 +73,7 @@
     <div class="section-col">
       <div class="section-title">Available Devices</div>
       <div class="list-box" id="deviceList">
-        <div style="color: #666; padding: 8px; font-size: 13px;">No devices loaded. Click Host or Connect to begin.</div>
+        <div style="color: #666; padding: 8px; font-size: 13px;">No devices loaded. Click Connect to begin.</div>
       </div>
     </div>
 
