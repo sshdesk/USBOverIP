@@ -19,11 +19,11 @@ const backendPort = process.env.INSTANCE_ID === '2' ? 8081 : 8080;
 function resolveBinaryPath() {
   const binaryName = process.platform === 'win32' ? 'guiElectron.exe' : 'guiElectron';
   const candidates = [
+    path.join(__dirname, '..', 'bin', binaryName),
+    path.join(__dirname, 'bin', binaryName),
     path.join(__dirname, '..', 'build-cache-windows_release', 'Release', binaryName),
     path.join(__dirname, '..', 'build-cache-windows_debug', 'Debug', binaryName),
-    path.join(__dirname, '..', 'build', binaryName),
-    path.join(__dirname, '..', 'bin', binaryName),
-    path.join(__dirname, 'bin', binaryName)
+    path.join(__dirname, '..', 'build', binaryName)
   ];
 
   for (const p of candidates) {

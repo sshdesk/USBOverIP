@@ -56,7 +56,7 @@
             </Component>
         </DirectoryRef>
 
-        <!-- 3. PowerShell Scripts, devnode.exe & Drivers Component -->
+
         <DirectoryRef Id="DriverFilesDir">
             <Component Id="GuiScriptsComponent" Guid="d4d54c09-9f1c-439f-a7a5-8d20bb29eb5e">
                 <!-- PowerShell Scripts -->
@@ -87,7 +87,7 @@
             </Component>
         </DirectoryRef>
 
-        <!-- 5. Feature Definition -->
+
         <Feature Id="ProductFeature" Title="USBIP Suite" Level="1">
             <ComponentRef Id="GuiAppBinaryComponent" />
             <ComponentRef Id="GuiAssetsComponent" />
@@ -95,7 +95,7 @@
             <ComponentRef Id="ApplicationProgramsFolderComponent" />
         </Feature>
 
-        <!-- 6. Custom Actions (Elevated PowerShell Execution) -->
+
         <!-- USBIP Drivers Custom Actions -->
         <CustomAction Id="RunInstallUsbipGui" 
                       Directory="DriverFilesDir" 

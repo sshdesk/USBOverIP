@@ -12,6 +12,8 @@
                 <Directory Id="ScriptsFolder" Name="scripts">
                     <Directory Id="DriverFilesDir" Name="usbip_drivers" />
                 </Directory>
+                <!-- Electron Folder -->
+                <Directory Id="ElectronFolder" Name="electron" />
             </Directory>
         </StandardDirectory>
 
@@ -23,7 +25,7 @@
 
         <DirectoryRef Id="AppFolder">
             <Component Id="GuiAppBinaryComponent" Guid="cc9a3725-1bc3-4f1e-be8d-4c5bfa02809f">
-                <File Id="GuiUsbipExe" Source="bin\gui_usbip.exe" KeyPath="yes">
+                <File Id="GuiUsbipExe" Source="bin\guiElectron.exe" KeyPath="yes">
                     <!-- Start Menu Shortcut -->
                     <Shortcut Id="ApplicationStartMenuShortcut" 
                               Directory="ApplicationProgramsFolder" 
@@ -40,10 +42,23 @@
                 <File Id="GoogleServicesJsonGui" Source="bin\google-services.json" />
                 <File Id="DevNodeExeGui" Source="bin\devnode.exe" />
                 <File Id="ConfExe" Source="script\config.txt" />
+                
+                <!-- SSL Certificates -->
+                <File Id="CertPemGui" Source="guiElectron\cert.pem" />
+                <File Id="KeyPemGui" Source="guiElectron\key.pem" />
             </Component>
         </DirectoryRef>
 
-        <!-- Start Menu Folder Component -->
+        <DirectoryRef Id="ElectronFolder">
+            <Component Id="GuiAssetsComponent" Guid="e5a7b8c9-1d2e-4f3a-9b8c-7d6e5f4a3b2c">
+                <File Id="ElectronIndexHtml" Source="electron\index.html" KeyPath="yes" />
+                <File Id="ElectronMainJs" Source="electron\main.js" />
+                <File Id="ElectronPreloadJs" Source="electron\preload.js" />
+                <File Id="ElectronRendererJs" Source="electron\renderer.js" />
+                <File Id="ElectronPackageJson" Source="electron\package.json" />
+            </Component>
+        </DirectoryRef>
+
         <DirectoryRef Id="ApplicationProgramsFolder">
             <Component Id="ApplicationProgramsFolderComponent" Guid="1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d">
                 <RemoveFolder Id="CleanUpShortcuts" On="uninstall" />
@@ -51,7 +66,6 @@
             </Component>
         </DirectoryRef>
 
-        <!-- 3. PowerShell Scripts, devnode.exe & Drivers Component -->
         <DirectoryRef Id="DriverFilesDir">
             <Component Id="GuiScriptsComponent" Guid="d4d54c09-9f1c-439f-a7a5-8d20bb29eb5e">
                 <!-- PowerShell Scripts -->
@@ -82,7 +96,6 @@
             </Component>
         </DirectoryRef>
 
-        <!-- 5. Feature Definition -->
         <Feature Id="ProductFeature" Title="USBIP Suite" Level="1">
             <ComponentRef Id="GuiAppBinaryComponent" />
             <ComponentRef Id="GuiAssetsComponent" />
@@ -90,7 +103,6 @@
             <ComponentRef Id="ApplicationProgramsFolderComponent" />
         </Feature>
 
-        <!-- 6. Custom Actions (Elevated PowerShell Execution) -->
         <!-- USBIP Drivers Custom Actions -->
         <CustomAction Id="RunInstallUsbipGui" 
                       Directory="DriverFilesDir" 

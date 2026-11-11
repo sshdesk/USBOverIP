@@ -6,6 +6,8 @@
 #include "webrtc_usbipd.h"
 #include "tcptunnel.h"
 
+#include <shellapi.h>
+
 #include <iostream>
 #include <string>
 #include <cstdlib>
@@ -47,6 +49,44 @@ GUI* g_active_gui = &g_headless_gui;
 
 static httplib::ws::WebSocket* g_active_ws = nullptr;
 static std::mutex g_ws_mutex;
+
+bool IsRunningAsAdmin() {
+    BOOL fIsRunAsAdmin = FALSE;
+    PSID pAdministratorsGroup = NULL;
+    SID_IDENTIFIER_AUTHORITY NtAuthority = SECURITY_NT_AUTHORITY;
+    
+    if (AllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID,
+                                 DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0,
+                                 &pAdministratorsGroup)) {
+        CheckTokenMembership(NULL, pAdministratorsGroup, &fIsRunAsAdmin);
+        FreeSid(pAdministratorsGroup);
+    }
+    return fIsRunAsAdmin == TRUE;
+}
+
+// Helper to elevate and restart the executable as administrator
+void RelaunchAsAdmin(int argc, char* argv[]) {
+    char szPath[MAX_PATH];
+    if (GetModuleFileNameA(NULL, szPath, ARRAYSIZE(szPath))) {
+        std::string args = "";
+        for (int i = 1; i < argc; ++i) {
+            args += " \"";
+            args += argv[i];
+            args += "\"";
+        }
+
+        SHELLEXECUTEINFOA sei = { sizeof(sei) };
+        sei.lpVerb = "runas";
+        sei.lpFile = szPath;
+        sei.lpParameters = args.empty() ? NULL : args.c_str();
+        sei.nShow = SW_NORMAL;
+
+        if (ShellExecuteExA(&sei)) {
+            exit(0); // Exit current non-elevated instance
+        }
+    }
+}
+
 
 void EmitEvent(const std::string& type, const std::string& payload) {
     json j;
@@ -294,6 +334,11 @@ void HandleCommand(const std::string& cmd) {
 }
 
 int main(int argc, char* argv[]) {
+
+    if (!IsRunningAsAdmin()) {
+        RelaunchAsAdmin(argc, argv);
+        return -1; 
+    }
     rtc::LogMessage::LogToDebug(rtc::LoggingSeverity::LS_ERROR);
 
     // Stream logs to console stdout
