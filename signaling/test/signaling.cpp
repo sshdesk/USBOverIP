@@ -22,18 +22,39 @@ void SendTargetedMessage(const std::string& token_id, const std::string& my_clie
     }
 }
 
-static void ParseEndpoint(const std::string& endpoint, std::string& out_host, std::string& out_path_prefix) {
-    std::regex rx("(https?://[^/]+)(/.*)?");
+static void ParseEndpoint(const std::string& endpoint, bool& out_is_ssl, std::string& out_host, std::string& out_path_prefix) {
+    std::regex rx("(https?)://([^/]+)(/.*)?");
     std::smatch match;
     if (std::regex_match(endpoint, match, rx)) {
-        out_host = match[1];
-        out_path_prefix = match[2].matched ? match[2].str() : "";
+        out_is_ssl = (match[1].str() == "https");
+        out_host = match[2].str();
+        out_path_prefix = match[3].matched ? match[3].str() : "";
         if (!out_path_prefix.empty() && out_path_prefix.back() == '/') {
             out_path_prefix.pop_back();
         }
     } else {
+        out_is_ssl = false;
         out_host = endpoint;
         out_path_prefix = "";
+    }
+}
+
+static std::unique_ptr<httplib::Client> CreateHttpClient(const std::string& endpoint, std::string& out_path_prefix) {
+    bool is_ssl = false;
+    std::string host = "";
+    ParseEndpoint(endpoint, is_ssl, host, out_path_prefix);
+
+    if (is_ssl) {
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+        auto cli = std::make_unique<httplib::Client>("https://" + host);
+        cli->enable_server_certificate_verification(false);
+        return cli;
+#else
+        SPDLOG_ERROR("HTTPS endpoint requested but CPPHTTPLIB_OPENSSL_SUPPORT is not defined!");
+        return std::make_unique<httplib::Client>("http://" + host);
+#endif
+    } else {
+        return std::make_unique<httplib::Client>("http://" + host);
     }
 }
 
@@ -74,7 +95,6 @@ std::string SignalingClient::GenerateRandomRoomId(size_t length) {
     }
     return random_id;
 }
-
 
 bool SignalingClient::SaveConfigToDisk(const std::string& token_id, bool remote_usb, const std::string& log_level, const std::string& filename) {
     nlohmann::json j;
@@ -120,17 +140,21 @@ void SignalingClient::LoadConfigFromDisk(std::string& out_room_id, bool& out_rem
 }
 
 void SignalingClient::PurgeOldMessages(const std::string& token_id) {
-    std::string host, path_prefix;
-    ParseEndpoint(api_endpoint_, host, path_prefix);
-    httplib::Client cli(host);
+    std::string path_prefix;
+    auto cli = CreateHttpClient(api_endpoint_, path_prefix);
 
     nlohmann::json req_json;
     req_json["room_id"] = token_id;
 
-    // Try DELETE request first to purge stale messages/clients, falling back to POST
-    auto res = cli.Delete((path_prefix + "/purgeStale").c_str(), req_json.dump(), "application/json");
+    auto res = cli->Delete((path_prefix + "/purgeStale").c_str(), req_json.dump(), "application/json");
     if (!res || res->status != 200) {
-        cli.Post((path_prefix + "/purgeStale").c_str(), req_json.dump(), "application/json");
+        res = cli->Post((path_prefix + "/purgeStale").c_str(), req_json.dump(), "application/json");
+    }
+
+    if (res && res->status == 200) {
+        SPDLOG_INFO("PurgeOldMessages response: {}", res->body);
+    } else {
+        SPDLOG_ERROR("PurgeOldMessages failed (status: {})", res ? res->status : -1);
     }
 }
 
@@ -153,9 +177,29 @@ void SignalingClient::StartHeartbeat(const std::string& token_id, const std::str
     std::lock_guard<std::mutex> lock(heartbeat_mutex_);
     heartbeat_active_ = true;
     heartbeat_thread_ = std::make_unique<std::thread>([token_id, my_client_id, this]() {
+        std::string path_prefix;
+        auto cli = CreateHttpClient(api_endpoint_, path_prefix);
+        cli->set_connection_timeout(5);
+        cli->set_read_timeout(5);
+
+        nlohmann::json req_json;
+        req_json["room_id"] = token_id;
+        req_json["client_id"] = my_client_id;
+        const std::string payload = req_json.dump();
+        const std::string heartbeat_path = path_prefix + "/heartbeat";
+
         while (heartbeat_active_) {
             for (int i = 0; i < 30 && heartbeat_active_; ++i) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            if (!heartbeat_active_) break;
+
+            if (auto res = cli->Post(heartbeat_path.c_str(), payload, "application/json")) {
+                if (res->status != 200) {
+                    SPDLOG_WARN("Heartbeat failed with HTTP status: {}", res->status);
+                }
+            } else {
+                SPDLOG_WARN("Heartbeat HTTP request failed.");
             }
         }
     });
@@ -163,22 +207,28 @@ void SignalingClient::StartHeartbeat(const std::string& token_id, const std::str
 
 void SignalingClient::JoinRoom(const std::string& token_id, const std::string& my_client_id, 
                                RoleAssignedCallback on_role_assigned) {
-    StartHeartbeat(token_id, my_client_id);
+    std::string path_prefix;
+    auto cli = CreateHttpClient(api_endpoint_, path_prefix);
 
-    std::string host, path_prefix;
-    ParseEndpoint(api_endpoint_, host, path_prefix);
-
-    httplib::Client cli(host);
-    std::string payload = "{\"room_id\":\"" + token_id + "\",\"client_id\":\"" + my_client_id + "\"}";
+    nlohmann::json req_json;
+    req_json["room_id"] = token_id;
+    req_json["client_id"] = my_client_id;
     
-    if (auto res = cli.Post((path_prefix + "/join").c_str(), payload, "application/json")) {
+    if (auto res = cli->Post((path_prefix + "/join").c_str(), req_json.dump(), "application/json")) {
         if (res->status == 200) {
             auto j = json::parse(res->body);
             bool is_caller = j.value("is_caller", false);
             std::string remote_peer = j.value("remote_peer_id", "");
+
+            StartHeartbeat(token_id, my_client_id);
+
             if (on_role_assigned) on_role_assigned(is_caller, remote_peer);
             return;
+        } else {
+            SPDLOG_ERROR("JoinRoom failed with HTTP status: {}", res->status);
         }
+    } else {
+        SPDLOG_ERROR("JoinRoom HTTP request failed completely.");
     }
 
     if (on_role_assigned) on_role_assigned(false, "");
@@ -188,14 +238,11 @@ void SignalingClient::RegisterOnPeerLeftEvent(PeerLeftCallback callback) { peer_
 void SignalingClient::RegisterOnSdpReceivedEvent(SdpReceivedCallback callback) { sdp_received_callback_ = callback; }
 void SignalingClient::RegisterOnIceReceivedEvent(IceReceivedCallback callback) { ice_received_callback_ = callback; }
 
-
-
 void SignalingClient::HandleGracefulExit(const std::string& token_id, const std::string& my_client_id) {
     StopHeartbeat();
 
-    std::string host, path_prefix;
-    ParseEndpoint(api_endpoint_, host, path_prefix);
-    httplib::Client cli(host);
+    std::string path_prefix;
+    auto cli = CreateHttpClient(api_endpoint_, path_prefix);
 
     nlohmann::json req_json;
     req_json["room_id"] = token_id;
@@ -203,16 +250,12 @@ void SignalingClient::HandleGracefulExit(const std::string& token_id, const std:
 
     bool deletion_confirmed = false;
 
-    // 1. Try DELETE request and verify response status
-    auto res = cli.Delete((path_prefix + "/leave").c_str(), req_json.dump(), "application/json");
+    auto res = cli->Delete((path_prefix + "/leave").c_str(), req_json.dump(), "application/json");
     if (res && (res->status == 200 || res->status == 204)) {
         SPDLOG_INFO("Successfully confirmed deletion of client [{}] from database via DELETE.", my_client_id);
         deletion_confirmed = true;
     } else {
-        SPDLOG_WARN("DELETE /leave failed or returned status {}. Trying POST fallback...", res ? res->status : -1);
-        
-        // 2. Fallback to POST request and verify response status
-        auto post_res = cli.Post((path_prefix + "/leave").c_str(), req_json.dump(), "application/json");
+        auto post_res = cli->Post((path_prefix + "/leave").c_str(), req_json.dump(), "application/json");
         if (post_res && (post_res->status == 200 || post_res->status == 204)) {
             SPDLOG_INFO("Successfully confirmed deletion of client [{}] from database via POST fallback.", my_client_id);
             deletion_confirmed = true;
@@ -222,7 +265,6 @@ void SignalingClient::HandleGracefulExit(const std::string& token_id, const std:
         }
     }
 
-    // Broadcast graceful exit notification to active peers
     nlohmann::json j;
     j["type"] = "system";
     j["message"] = "Goodbye! I have closed my connection.";
@@ -231,18 +273,15 @@ void SignalingClient::HandleGracefulExit(const std::string& token_id, const std:
     SPDLOG_INFO("HandleGracefulExit");
 }
 
-
-
 void SignalingClient::ListenForTargetedMessages(const std::string& token_id, const std::string& my_client_id) {
     polling_active_ = true;
     polling_thread_ = std::make_unique<std::thread>([token_id, my_client_id, this]() {
-        std::string host, path_prefix;
-        ParseEndpoint(api_endpoint_, host, path_prefix);
-        httplib::Client cli(host);
+        std::string path_prefix;
+        auto cli = CreateHttpClient(api_endpoint_, path_prefix);
 
         while (polling_active_) {
             std::string path = path_prefix + "/messages?room_id=" + token_id + "&client_id=" + my_client_id;
-            if (auto res = cli.Get(path.c_str())) {
+            if (auto res = cli->Get(path.c_str())) {
                 if (res->status == 200 && !res->body.empty()) {
                     auto messages = json::parse(res->body);
                     for (const auto& msg : messages) {
@@ -254,11 +293,9 @@ void SignalingClient::ListenForTargetedMessages(const std::string& token_id, con
                                 payload_json = msg["text"];
                             } else if (msg.contains("text") && msg["text"].is_string()) {
                                 std::string raw_text = msg["text"].get<std::string>();
-                                // Check if it's a valid JSON string before parsing
                                 if (!raw_text.empty() && raw_text.front() == '{') {
                                     payload_json = json::parse(raw_text);
                                 } else {
-                                    SPDLOG_INFO("Skipping non-JSON system message: {}", raw_text);
                                     continue;
                                 }
                             }
@@ -289,21 +326,19 @@ void SignalingClient::ListenForTargetedMessages(const std::string& token_id, con
 
 void SignalingClient::SendTargetedMessage(const std::string& token_id, const std::string& my_client_id, 
                                           const std::string& target_client_id, const std::string& text_payload) {
-    std::string host, path_prefix;
-    ParseEndpoint(api_endpoint_, host, path_prefix);
-    httplib::Client cli(host);
+    std::string path_prefix;
+    auto cli = CreateHttpClient(api_endpoint_, path_prefix);
 
     json req_json;
     req_json["room_id"] = token_id;
     req_json["sender_id"] = my_client_id;
     req_json["target_id"] = target_client_id;
 
-    // Ensure text_payload is nested as a JSON object if it's a valid JSON string
     try {
         req_json["text"] = json::parse(text_payload);
     } catch (...) {
         req_json["text"] = text_payload;
     }
 
-    cli.Post((path_prefix + "/messages").c_str(), req_json.dump(), "application/json");
+    cli->Post((path_prefix + "/messages").c_str(), req_json.dump(), "application/json");
 }

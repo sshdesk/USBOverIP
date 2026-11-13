@@ -1,0 +1,11 @@
+name = "webrtc-signaling"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+
+[triggers]
+crons = ["* * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "signaling-db"
+database_id = "aa6138d2-58d7-47e9-aea8-ff841a353124"

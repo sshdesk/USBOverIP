@@ -115,7 +115,7 @@ int main() {
     signaling_client->SetupLogging("info");
 
     // signaling_client->SetApiEndpoint("http://localhost:8080/prod");
-    signaling_client->SetApiEndpoint("https://your-api-id.execute-api.us-east-1.amazonaws.com/prod");
+    signaling_client->SetApiEndpoint("https://webrtc-signaling.webrtc-signaling-arvind.workers.dev/prod");
 
     std::srand(static_cast<unsigned int>(std::time(nullptr)));
 
