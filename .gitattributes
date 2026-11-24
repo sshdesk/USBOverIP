@@ -3,3 +3,4 @@
 *.sys binary
 *.cat binary
 *.cer binary
+firebase/conan-deps/src/temp/conan-cache-linux-linux_release.tar.gz filter=lfs diff=lfs merge=lfs -text
